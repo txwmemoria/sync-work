@@ -123,6 +123,10 @@ async fn handle_connection(conn: Connection) -> Result<()> {
 /// Read one request and hand it to the module that owns it.
 async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Result<()> {
     let req: Request = transport::read_json(&mut rx).await?;
+    // Requests are logged as they arrive. All the interesting output — stages,
+    // build logs, diagnostics — is streamed to the *requester*, so without this
+    // the node looks idle even while it is compiling.
+    tracing::info!("{peer_name}: {}", describe(&req));
     match req {
         Request::Ping { protocol } => {
             let machine = Machine::load()?;
@@ -205,6 +209,19 @@ async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Resul
             tx.finish().ok();
             Ok(())
         }
+    }
+}
+
+/// One-line summary of a request, for the node's log.
+fn describe(req: &Request) -> String {
+    match req {
+        Request::Ping { .. } => "ping".into(),
+        Request::Verify(v) => format!("verify {}/{}", v.project, v.recipe),
+        Request::CtxManifest { project, .. } => format!("ctx manifest {project}"),
+        Request::CtxFetch { project, paths, .. } => {
+            format!("ctx fetch {project} ({} files)", paths.len())
+        }
+        Request::CtxPush { project, .. } => format!("ctx push {project}"),
     }
 }
 

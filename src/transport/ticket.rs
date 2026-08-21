@@ -26,6 +26,15 @@ pub struct Ticket {
     pub platform: Platform,
     #[serde(default)]
     pub addr: Option<EndpointAddr>,
+    /// When this ticket is a *reply*, the id of the machine it answers.
+    ///
+    /// Pairing is three commands: init, join, join back. From inside the second
+    /// and third of those the local state looks identical — an empty peer table
+    /// either way — so nothing local can tell whether another round trip is
+    /// needed. Carrying the acknowledgement makes the final `join` able to say
+    /// "done" instead of prompting for a fourth step that does nothing.
+    #[serde(default)]
+    pub acking: Option<String>,
 }
 
 const TICKET_PREFIX: &str = "sw1";
@@ -67,6 +76,7 @@ pub async fn local_ticket(
     ep: &Endpoint,
     machine: &Machine,
     name: Option<String>,
+    acking: Option<String>,
 ) -> Result<Ticket> {
     // Wait for a relay handshake so the ticket carries a reachable address.
     // Without this the first connection has to fall back to discovery, which
@@ -77,6 +87,7 @@ pub async fn local_ticket(
         name: name.unwrap_or_else(|| machine.node_name()),
         platform: Platform::current(),
         addr: Some(ep.addr()),
+        acking,
     })
 }
 
@@ -91,6 +102,7 @@ mod tests {
             name: "mac-mini".into(),
             platform: Platform::Macos,
             addr: None,
+            acking: None,
         }
     }
 
@@ -103,6 +115,24 @@ mod tests {
         assert_eq!(back.id, t.id);
         assert_eq!(back.name, t.name);
         assert_eq!(back.platform, Platform::Macos);
+    }
+
+    #[test]
+    fn a_reply_ticket_says_who_it_answers() {
+        // An opening ticket acknowledges nobody, so the recipient knows a reply
+        // is still owed.
+        let opening = sample();
+        assert!(opening.acking.is_none());
+
+        // A reply names the machine it answers, which is how the third `join`
+        // knows the pairing is already mutual.
+        let reply = Ticket {
+            id: "1".repeat(64),
+            acking: Some(opening.id.clone()),
+            ..sample()
+        };
+        let back = Ticket::decode(&reply.encode().unwrap()).unwrap();
+        assert_eq!(back.acking.as_deref(), Some(opening.id.as_str()));
     }
 
     #[test]

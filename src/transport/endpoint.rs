@@ -91,6 +91,7 @@ mod tests {
             name: "mac-mini".into(),
             platform: Platform::Macos,
             addr: None,
+            acking: None,
         }
     }
 

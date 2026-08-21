@@ -46,7 +46,10 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_env("SW_LOG").unwrap_or_else(|_| "warn".into()),
+            // The resident node logs one line per request at info; everything
+            // else stays quiet unless SW_LOG asks for more.
+            tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
+                .unwrap_or_else(|_| "warn,syncwork=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();

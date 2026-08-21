@@ -19,7 +19,7 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
         PairCmd::Init { name } => {
             let ticket = transport::with_endpoint(&identity, |ep| {
                 let machine = &machine;
-                async move { transport::local_ticket(&ep, machine, name).await }
+                async move { transport::local_ticket(&ep, machine, name, None).await }
             })
             .await?;
 
@@ -42,9 +42,10 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
                 bail!("that ticket is from this machine");
             }
 
+            let acking = Some(incoming.id.clone());
             let mine = transport::with_endpoint(&identity, |ep| {
                 let machine = &machine;
-                async move { transport::local_ticket(&ep, machine, name).await }
+                async move { transport::local_ticket(&ep, machine, name, acking).await }
             })
             .await?;
 
@@ -69,10 +70,25 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
                 incoming.name,
                 incoming.platform
             );
-            println!();
-            println!("{}", "Run this back on the other machine:".bold());
-            println!();
-            println!("  sw pair join {}", mine.encode()?);
+            // If the incoming ticket acknowledges us, the other machine already
+            // has our key and the pairing is mutual — prompting for another round
+            // trip would send the user off to run a no-op.
+            if incoming.acking.as_deref() == Some(identity.id_string().as_str()) {
+                println!();
+                println!(
+                    "{} both machines now know each other.",
+                    "done".green().bold()
+                );
+                println!(
+                    "Next, in each checkout you want to verify: {}",
+                    "sw link".cyan()
+                );
+            } else {
+                println!();
+                println!("{}", "Run this back on the other machine:".bold());
+                println!();
+                println!("  sw pair join {}", mine.encode()?);
+            }
             Ok(0)
         }
 

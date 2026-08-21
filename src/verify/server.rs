@@ -128,6 +128,22 @@ pub async fn handle(
                 message: format!("{e:#}"),
             },
         };
+        // Mirrored into the node's own log: the requester sees the full build
+        // output, but whoever is watching this machine should still see that a
+        // request arrived and how it ended.
+        match &ev {
+            Event::Done { code, ms } => {
+                tracing::info!(
+                    "{label}: {}/{} -> exit {code} in {ms}ms",
+                    v.project,
+                    v.recipe
+                )
+            }
+            Event::Failed { message } => {
+                tracing::warn!("{label}: {}/{} -> {message}", v.project, v.recipe)
+            }
+            _ => {}
+        }
         send(ev).await;
         // `etx` drops here, which is what ends the drain below.
     };
