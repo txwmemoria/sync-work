@@ -504,38 +504,54 @@ pub fn restart() -> Result<()> {
     Ok(())
 }
 
-/// How many resident nodes are running here.
+/// The command that lists resident node processes, one pid per line.
 ///
-/// `None` when the check itself could not run, which is different from zero and
-/// must not be reported as "not running".
-///
-/// Matched on the command line rather than the image name for the same reason the
-/// stop command is: `sw verify` is the same executable, and counting those would
-/// make a healthy machine look like it has stray nodes.
-pub fn running_nodes() -> Option<usize> {
-    let cmd: Vec<&str> = match Platform::current() {
+/// Both platforms print pids rather than a count so there is a single parsing
+/// path. The previous version used `pgrep -c`, which is a GNU extension: BSD
+/// pgrep — the one macOS ships — rejects it, produced empty output, and that was
+/// read as "no nodes running". Reporting a healthy node as stopped is worse than
+/// reporting nothing, so the exit status is now consulted too.
+fn node_probe_command() -> Vec<&'static str> {
+    match Platform::current() {
         Platform::Windows => vec![
             "powershell",
             "-NoProfile",
             "-Command",
             concat!(
-                "(Get-CimInstance Win32_Process -Filter 'Name=''sw.exe''' | ",
+                "Get-CimInstance Win32_Process -Filter 'Name=''sw.exe''' | ",
                 "Where-Object { $_.CommandLine -like '* node*' } | ",
-                "Measure-Object).Count"
+                "ForEach-Object { $_.ProcessId }"
             ),
         ],
-        // -c counts matches. It exits 1 with a count of 0 when nothing matches,
-        // which is a legitimate answer rather than a failed check.
-        _ => vec!["pgrep", "-c", "-f", "sw node"],
-    };
-    let out = Command::new(cmd[0]).args(&cmd[1..]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    // pgrep exits 1 with no output when nothing matched. That is a real answer of
-    // zero, not a failed check, so it must not become `None`.
-    if text.is_empty() {
-        return Some(0);
+        // No -c: portable across BSD and GNU pgrep.
+        _ => vec!["pgrep", "-f", "sw node"],
     }
-    text.parse().ok()
+}
+
+/// Count the pids a probe printed.
+fn count_pids(stdout: &str) -> usize {
+    stdout.lines().filter(|l| !l.trim().is_empty()).count()
+}
+
+/// How many resident nodes are running here.
+///
+/// `None` when the probe itself could not be trusted, which is deliberately
+/// distinct from zero: "could not tell" is a different instruction to the reader
+/// than "not running".
+///
+/// Matched on the command line rather than the image name for the same reason the
+/// stop command is: `sw verify` is the same executable, and counting those would
+/// make a healthy machine look like it has stray nodes.
+pub fn running_nodes() -> Option<usize> {
+    let cmd = node_probe_command();
+    let out = Command::new(cmd[0]).args(&cmd[1..]).output().ok()?;
+    // pgrep exits 0 when it matched and 1 when it did not; both are answers.
+    // Anything else is a usage or system error, and PowerShell only returns 0
+    // here, so treat the rest as unknown rather than as zero.
+    if !matches!(out.status.code(), Some(0) | Some(1)) {
+        return None;
+    }
+    Some(count_pids(&String::from_utf8_lossy(&out.stdout)))
 }
 
 /// Whether the autostart entry exists, without printing anything.
@@ -903,6 +919,22 @@ mod tests {
             assert!(cmd.contains(WIN_RUN_KEY), "wrong key: {cmd}");
             assert!(cmd.contains(&plan.label), "wrong value name: {cmd}");
         }
+    }
+
+    #[test]
+    fn pids_are_counted_by_line_on_every_platform() {
+        assert_eq!(count_pids(""), 0);
+        assert_eq!(count_pids("\n"), 0);
+        assert_eq!(count_pids("1234\n"), 1);
+        assert_eq!(count_pids("1234\n5678\n"), 2);
+        // PowerShell emits CRLF; blank trailing lines must not inflate it.
+        assert_eq!(count_pids("1234\r\n5678\r\n\r\n"), 2);
+
+        // The probe must not ask for `pgrep -c`: that is a GNU extension, and BSD
+        // pgrep rejects it, which is how a running node came to be reported as
+        // stopped on macOS.
+        let cmd = node_probe_command().join(" ");
+        assert!(!cmd.contains(" -c"), "got {cmd}");
     }
 
     #[test]
