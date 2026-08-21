@@ -11,8 +11,13 @@
 //!
 //! | lives in                        | holds                                  |
 //! |---------------------------------|----------------------------------------|
-//! | `~/.config/syncwork/config.toml`| node name, peers, project registry     |
-//! | `~/.config/syncwork/identity.key`| the secret key                        |
+//! | machine dir `config.toml`       | node name, peers, project registry     |
+//! | machine dir `identity.key`      | the secret key                         |
+//!
+//! The machine directory follows platform convention, so it is *not* the same
+//! path on both machines: `~/Library/Application Support/syncwork` on macOS,
+//! `%APPDATA%\syncwork\config` on Windows, `~/.config/syncwork` on Linux.
+//! `SW_HOME` overrides it.
 //! | `<repo>/syncwork.toml` (in git) | project name, recipes, context options |
 //!
 //! Peer entries carry no filesystem paths. Each machine records where a project

@@ -28,9 +28,17 @@ $ echo $?
 
 | 存放位置 | 内容 | 作用域 |
 |---|---|---|
-| `~/.config/syncwork/config.toml` | 本机名字、已配对的机器、**项目名 → 本机路径** 的注册表 | 机器 |
-| `~/.config/syncwork/identity.key` | 私钥（唯一的秘密） | 机器 |
+| 机器状态目录下的 `config.toml` | 本机名字、已配对的机器、**项目名 → 本机路径** 的注册表 | 机器 |
+| 机器状态目录下的 `identity.key` | 私钥（唯一的秘密） | 机器 |
 | `<仓库>/syncwork.toml`（进 git） | 项目名、构建配方、上下文选项 | 仓库 |
+
+机器状态目录遵循各平台惯例（`SW_HOME` 可覆盖）：
+
+| 平台 | 路径 |
+|---|---|
+| macOS | `~/Library/Application Support/syncwork/` |
+| Windows | `%APPDATA%\syncwork\config\` |
+| Linux | `~/.config/syncwork/` |
 
 由此得到：
 
