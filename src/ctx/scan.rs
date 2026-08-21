@@ -40,6 +40,18 @@ fn hash_file(path: &Path) -> Result<String> {
 /// a normal state, and it should still be able to receive.
 pub fn scan(root: &Root) -> Result<CtxRoot> {
     if !root.dir.is_dir() {
+        // Existing-but-not-a-directory is a misconfiguration, not an absence, and
+        // silently syncing nothing is the worst way to report it. Several AI tools
+        // keep per-project state in a *file* (Aider's `.aider.chat.history.md`,
+        // for one), so pointing `extra` at one is an easy mistake to make.
+        if root.dir.exists() {
+            tracing::warn!(
+                "context root `{}` is {} — a root must be a directory, so nothing \
+                 will sync from it",
+                root.key,
+                root.dir.display()
+            );
+        }
         return Ok(CtxRoot {
             key: root.key.clone(),
             present: false,
