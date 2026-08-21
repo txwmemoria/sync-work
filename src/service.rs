@@ -5,6 +5,13 @@
 //! remove. Each platform gets its native user-level mechanism — no admin rights
 //! anywhere, because this is a development tool and should not need them.
 //!
+//! Windows uses the per-user `Run` key rather than a Scheduled Task: creating a
+//! task with a logon trigger is refused outright under the usual corporate
+//! policy — `schtasks /Create /SC ONLOGON` returns `Access is denied`, with or
+//! without `/RU` and `/IT`. The `Run` key needs no elevation. The cost is that
+//! Windows then has no supervisor, so `install` and `restart` start the node
+//! themselves and there is no keep-alive.
+//!
 //! One service per *machine*, not per repository: the node it starts serves
 //! every project in the machine registry, so linking a new project needs no
 //! service changes at all.
@@ -12,7 +19,7 @@
 //! | platform | mechanism                          |
 //! |----------|------------------------------------|
 //! | macOS    | launchd LaunchAgent (`~/Library/LaunchAgents`) |
-//! | Windows  | Scheduled Task, trigger ONLOGON    |
+//! | Windows  | `HKCU\...\CurrentVersion\Run` value  |
 //! | Linux    | systemd user unit                  |
 //!
 //! ## The PATH problem
@@ -24,6 +31,7 @@
 //! effect at install time is captured into the service definition.
 
 use crate::config::Platform;
+use crate::style::Paint;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -37,15 +45,83 @@ pub fn label() -> String {
     }
 }
 
+/// Where the node's output ends up.
+///
+/// Not a path, because on Linux it is not one: systemd captures stdout into the
+/// journal, addressed by unit name. Modelling that as a `PathBuf` holding a
+/// command string — which this used to do — makes every consumer wrong.
+pub enum LogSource {
+    File(PathBuf),
+    /// systemd journal, addressed by unit name.
+    Journal(String),
+}
+
+impl LogSource {
+    /// How to describe the location to a human.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::File(p) => p.display().to_string(),
+            Self::Journal(unit) => format!("systemd journal (unit {unit})"),
+        }
+    }
+
+    /// The command that shows it.
+    fn view_command(&self, follow: bool, lines: u32) -> Vec<String> {
+        match self {
+            Self::File(p) => {
+                if Platform::current() == Platform::Windows {
+                    // No tail on Windows; Get-Content -Wait is the equivalent.
+                    let wait = if follow { " -Wait" } else { "" };
+                    vec![
+                        "powershell".into(),
+                        "-NoProfile".into(),
+                        "-Command".into(),
+                        format!(
+                            "Get-Content -Path '{}' -Tail {lines}{wait}",
+                            p.display().to_string().replace('\'', "''")
+                        ),
+                    ]
+                } else {
+                    let mut v = vec!["tail".to_string()];
+                    if follow {
+                        v.push("-f".into());
+                    }
+                    v.push("-n".into());
+                    v.push(lines.to_string());
+                    v.push(p.display().to_string());
+                    v
+                }
+            }
+            Self::Journal(unit) => {
+                let mut v = vec![
+                    "journalctl".to_string(),
+                    "--user".into(),
+                    "-u".into(),
+                    format!("{unit}.service"),
+                    "-n".into(),
+                    lines.to_string(),
+                ];
+                if follow {
+                    v.push("-f".into());
+                }
+                v
+            }
+        }
+    }
+}
+
 /// Where a service definition lives, and how it is named.
 pub struct Plan {
     pub label: String,
     /// File to write, when the platform uses one.
     pub file: Option<PathBuf>,
     pub contents: Option<String>,
-    /// Commands to run after writing, in order.
+    /// Commands to run to completion, in order.
     pub commands: Vec<Vec<String>>,
-    pub log: PathBuf,
+    /// Commands spawned *without* waiting — the node itself, on a platform with
+    /// no supervisor to start it for us.
+    pub detached: Vec<Vec<String>>,
+    pub log: LogSource,
 }
 
 fn home() -> Result<PathBuf> {
@@ -126,9 +202,11 @@ fn plan_macos(label: String, exe: &Path) -> Result<Plan> {
                 file.display().to_string(),
             ],
         ],
+        // launchd starts it for us thanks to RunAtLoad.
+        detached: Vec::new(),
         file: Some(file),
         label,
-        log,
+        log: LogSource::File(log),
     })
 }
 
@@ -155,47 +233,85 @@ unsafe fn libc_getuid() -> u32 {
 
 // ---------------------------------------------------------------- Windows
 
-/// The command a Scheduled Task runs.
+const WIN_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// PowerShell that starts the node with its output redirected to the log.
 ///
-/// It goes through PowerShell rather than invoking `sw.exe` directly for two
-/// reasons: `-WindowStyle Hidden` keeps a console window from appearing at every
-/// logon, and the redirect gives the node a log file. Single quotes are the
-/// outer quoting so the whole thing survives being embedded in `/TR "..."`.
-pub fn schtasks_command(exe: &Path, log: &Path) -> String {
+/// Kept in a `.ps1` rather than inlined into the registry value: the expression
+/// needs quotes around two paths, and nesting those inside a `reg add /d`
+/// argument is a quoting hazard for no benefit. The registry value then only has
+/// to quote one plain path.
+pub fn windows_launcher_script(exe: &Path, log: &Path) -> String {
     let q = |p: &Path| p.display().to_string().replace('\'', "''");
     format!(
-        "powershell -NoProfile -WindowStyle Hidden -Command \"& '{}' node *> '{}'\"",
+        "# Written by `sw service install`. Starts the resident node at logon.\n& '{}' node *> '{}'\n",
         q(exe),
         q(log)
     )
 }
 
+/// The `Run` value that executes that script at logon, windowless.
+pub fn windows_run_value(script: &Path) -> String {
+    format!(
+        "powershell -NoProfile -WindowStyle Hidden -File \"{}\"",
+        script.display()
+    )
+}
+
+/// Stop a running node without disturbing short-lived client invocations.
+///
+/// Matched on the command line rather than the image name: `sw verify` is the
+/// same executable, and killing someone's in-flight build would be worse than
+/// leaving a stale node running.
+fn windows_stop_command() -> Vec<String> {
+    // Doubled single quotes are how a single-quoted PowerShell string escapes a
+    // quote, which keeps this expression free of double quotes entirely.
+    let expr = concat!(
+        "Get-CimInstance Win32_Process -Filter 'Name=''sw.exe''' | ",
+        "Where-Object { $_.CommandLine -like '* node*' } | ",
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    );
+    vec![
+        "powershell".into(),
+        "-NoProfile".into(),
+        "-Command".into(),
+        expr.into(),
+    ]
+}
+
 fn plan_windows(label: String, exe: &Path) -> Result<Plan> {
-    let log_dir = directories::BaseDirs::new()
+    let dir = directories::BaseDirs::new()
         .map(|b| b.data_local_dir().join("syncwork"))
         .context("cannot determine local data directory")?;
-    let log = log_dir.join(format!("{label}.log"));
+    let log = dir.join(format!("{label}.log"));
+    let script = dir.join("node.ps1");
     Ok(Plan {
-        file: None,
-        contents: None,
+        contents: Some(windows_launcher_script(exe, &log)),
         commands: vec![vec![
-            "schtasks".into(),
-            "/Create".into(),
-            "/TN".into(),
+            "reg".into(),
+            "add".into(),
+            WIN_RUN_KEY.into(),
+            "/v".into(),
             label.clone(),
-            "/TR".into(),
-            schtasks_command(exe, &log),
-            "/SC".into(),
-            "ONLOGON".into(),
-            // Least privilege, and it avoids the credential prompt that
-            // "run whether logged on or not" would require.
-            "/RL".into(),
-            "LIMITED".into(),
-            // Overwrite an existing task so install is idempotent.
-            "/F".into(),
+            "/t".into(),
+            "REG_SZ".into(),
+            "/d".into(),
+            windows_run_value(&script),
+            "/f".into(),
         ]],
+        // Nothing supervises this on Windows, so `install` starts the node itself
+        // rather than making the user log out and back in.
+        detached: vec![vec![
+            "powershell".into(),
+            "-NoProfile".into(),
+            "-WindowStyle".into(),
+            "Hidden".into(),
+            "-File".into(),
+            script.display().to_string(),
+        ]],
+        file: Some(script),
         label,
-        log,
+        log: LogSource::File(log),
     })
 }
 
@@ -236,8 +352,10 @@ fn plan_linux(label: String, exe: &Path) -> Result<Plan> {
                 format!("{label}.service"),
             ],
         ],
+        // systemd starts it via `enable --now`.
+        detached: Vec::new(),
         file: Some(file),
-        log: PathBuf::from("journalctl --user -u ".to_string() + &label),
+        log: LogSource::Journal(label.clone()),
         label,
     })
 }
@@ -277,59 +395,88 @@ fn run_all(cmds: &[Vec<String>], tolerate_first: bool) -> Result<()> {
     Ok(())
 }
 
+/// Spawn commands without waiting, so the node outlives this process.
+fn spawn_all(cmds: &[Vec<String>]) -> Result<()> {
+    for cmd in cmds {
+        Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .spawn()
+            .with_context(|| format!("could not start `{}`", cmd[0]))?;
+    }
+    Ok(())
+}
+
 /// Commands that stop and start the installed service again.
 ///
 /// Needed because `install` is not a restart: on Windows `schtasks /Create /F`
 /// rewrites the task definition without touching the process already running
 /// from the previous one, so an updated binary would not take effect until the
 /// next logon.
-fn restart_commands(label: &str) -> Vec<Vec<String>> {
+fn restart_plan(plan: &Plan) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    let label = &plan.label;
     match Platform::current() {
         // `kickstart -k` kills the running instance and starts it again in one
         // step, which is what launchd offers instead of a restart verb.
-        Platform::Macos => vec![vec![
-            "launchctl".into(),
-            "kickstart".into(),
-            "-k".into(),
-            format!("gui/{}/{label}", unsafe_uid()),
-        ]],
-        Platform::Windows => vec![
-            vec![
-                "schtasks".into(),
-                "/End".into(),
-                "/TN".into(),
-                label.to_string(),
-            ],
-            vec![
-                "schtasks".into(),
-                "/Run".into(),
-                "/TN".into(),
-                label.to_string(),
-            ],
-        ],
-        Platform::Linux => vec![vec![
-            "systemctl".into(),
-            "--user".into(),
-            "restart".into(),
-            format!("{label}.service"),
-        ]],
+        Platform::Macos => (
+            vec![vec![
+                "launchctl".into(),
+                "kickstart".into(),
+                "-k".into(),
+                format!("gui/{}/{label}", unsafe_uid()),
+            ]],
+            Vec::new(),
+        ),
+        Platform::Linux => (
+            vec![vec![
+                "systemctl".into(),
+                "--user".into(),
+                "restart".into(),
+                format!("{label}.service"),
+            ]],
+            Vec::new(),
+        ),
+        // No supervisor here: stop it, then start it ourselves.
+        Platform::Windows => (vec![windows_stop_command()], plan.detached.clone()),
     }
 }
 
 /// Stop and start the service, so an updated binary takes effect.
 pub fn restart() -> Result<()> {
     let plan = build_plan()?;
-    let cmds = restart_commands(&plan.label);
+    let (stop, start) = restart_plan(&plan);
     // The stop half is tolerated: restarting something already stopped should
     // just start it.
-    run_all(&cmds, true).with_context(|| {
+    run_all(&stop, true).with_context(|| {
         format!(
             "could not restart {}; is it installed? try `sw service status`",
             plan.label
         )
     })?;
+    spawn_all(&start)?;
     println!("restarted {}", plan.label);
-    println!("node logs to {}", plan.log.display());
+    println!("node logs to {}", plan.log.describe());
+    Ok(())
+}
+
+/// Show the node's log, wherever this platform keeps it.
+///
+/// Exists so nobody has to remember three different answers: a file under
+/// `~/Library/Logs`, a file under `%LOCALAPPDATA%`, or a systemd journal unit.
+pub fn logs(follow: bool, lines: u32) -> Result<()> {
+    let plan = build_plan()?;
+    let cmd = plan.log.view_command(follow, lines);
+    eprintln!("{} {}", "log".bold(), plan.log.describe().dimmed());
+    // stdio is inherited so `--follow` streams instead of buffering.
+    let status = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .status()
+        .with_context(|| format!("could not run `{}`", cmd[0]))?;
+    if !status.success() {
+        bail!(
+            "`{}` exited with {status}. If the node has never run there may be no log yet.",
+            cmd.join(" ")
+        );
+    }
     Ok(())
 }
 
@@ -338,7 +485,7 @@ pub fn print_plan() -> Result<()> {
     let plan = build_plan()?;
     println!("platform  {}", Platform::current());
     println!("label     {}", plan.label);
-    println!("log       {}", plan.log.display());
+    println!("log       {}", plan.log.describe());
     if let (Some(f), Some(c)) = (&plan.file, &plan.contents) {
         println!("\nwould write {}:\n", f.display());
         println!("{c}");
@@ -353,11 +500,12 @@ pub fn print_plan() -> Result<()> {
 pub fn install() -> Result<()> {
     let plan = build_plan()?;
 
-    if let Some(parent) = plan.log.parent() {
-        // Windows' log path has a real parent; Linux's "log" is a hint string.
-        if !parent.as_os_str().is_empty() && Platform::current() != Platform::Linux {
-            let _ = std::fs::create_dir_all(parent);
-        }
+    // The log directory has to exist before the service redirects into it. The
+    // journal needs nothing, which is exactly what the enum makes obvious.
+    if let LogSource::File(p) = &plan.log
+        && let Some(parent) = p.parent()
+    {
+        let _ = std::fs::create_dir_all(parent);
     }
     if let (Some(f), Some(c)) = (&plan.file, &plan.contents) {
         if let Some(parent) = f.parent() {
@@ -371,9 +519,11 @@ pub fn install() -> Result<()> {
     // The first command is a best-effort teardown of any previous install; it
     // legitimately fails when nothing was registered yet.
     run_all(&plan.commands, true)?;
+    // On platforms without a supervisor this is what actually starts the node.
+    spawn_all(&plan.detached)?;
 
     println!("installed {}", plan.label);
-    println!("node logs to {}", plan.log.display());
+    println!("node logs to {}", plan.log.describe());
     Ok(())
 }
 
@@ -505,36 +655,6 @@ mod tests {
     }
 
     #[test]
-    fn schtasks_command_hides_the_console_and_quotes_paths() {
-        let c = schtasks_command(
-            Path::new(r"C:\tools\sw.exe"),
-            Path::new(r"C:\Users\me\AppData\Local\syncwork\a.log"),
-        );
-        // A console window at every logon would be unacceptable.
-        assert!(c.contains("-WindowStyle Hidden"));
-        assert!(c.contains("-NoProfile"));
-        assert!(c.contains(r"'C:\tools\sw.exe'"));
-        assert!(c.contains("node"));
-        // PowerShell's redirect-all operator, so stderr reaches the log too.
-        assert!(c.contains("*>"));
-        // The outer quoting must stay balanced for /TR "..." to survive.
-        assert_eq!(c.matches('"').count(), 2);
-        // No `-C <repo>`: the node serves every linked project. Matching the
-        // flag with its argument, since `-Command` also starts with `-C`.
-        assert!(
-            !c.contains("-C '"),
-            "service must not be bound to a single repo"
-        );
-    }
-
-    #[test]
-    fn schtasks_command_escapes_embedded_single_quotes() {
-        let c = schtasks_command(Path::new(r"C:\it's\sw.exe"), Path::new(r"C:\l.log"));
-        // Doubling is how PowerShell escapes a quote inside a single-quoted string.
-        assert!(c.contains(r"'C:\it''s\sw.exe'"), "got {c}");
-    }
-
-    #[test]
     fn systemd_unit_restarts_and_carries_the_path() {
         let u = systemd_unit(Path::new("/home/me/.cargo/bin/sw"), "/usr/bin:/bin");
         assert!(u.contains("ExecStart=/home/me/.cargo/bin/sw node"));
@@ -548,23 +668,110 @@ mod tests {
     }
 
     #[test]
-    fn restart_actually_stops_before_starting() {
-        let cmds = restart_commands("syncwork-node");
-        assert!(!cmds.is_empty());
-        let flat: Vec<String> = cmds.iter().map(|c| c.join(" ")).collect();
+    fn windows_launcher_hides_the_console_and_redirects_both_streams() {
+        let s = windows_launcher_script(
+            Path::new(r"C:\tools\sw.exe"),
+            Path::new(r"C:\Users\me\AppData\Local\syncwork\a.log"),
+        );
+        assert!(s.contains(r"& 'C:\tools\sw.exe' node"), "got {s}");
+        // `*>` rather than `>`: stderr carries the node's log, so a plain stdout
+        // redirect would capture nothing useful.
+        assert!(
+            s.contains(r"*> 'C:\Users\me\AppData\Local\syncwork\a.log'"),
+            "got {s}"
+        );
+        // No `-C <repo>`: one node serves every linked project.
+        assert!(
+            !s.contains("-C "),
+            "service must not be bound to a single repo"
+        );
+
+        let v = windows_run_value(Path::new(r"C:\Users\me\AppData\Local\syncwork\node.ps1"));
+        // A console window at every logon would be unacceptable.
+        assert!(v.contains("-WindowStyle Hidden"), "got {v}");
+        assert!(v.contains("-NoProfile"));
+        // Exactly one quoted path. The whole point of the .ps1 indirection is
+        // that the registry value never has to nest quotes.
+        assert_eq!(v.matches('"').count(), 2, "got {v}");
+    }
+
+    #[test]
+    fn windows_launcher_escapes_embedded_single_quotes() {
+        let s = windows_launcher_script(Path::new(r"C:\it's\sw.exe"), Path::new(r"C:\l.log"));
+        // Doubling is how PowerShell escapes a quote inside a single-quoted string.
+        assert!(s.contains(r"'C:\it''s\sw.exe'"), "got {s}");
+    }
+
+    #[test]
+    fn stopping_the_node_does_not_kill_client_invocations() {
+        let c = windows_stop_command().join(" ");
+        // Filtering on the command line is the whole point: `sw verify` is the
+        // same image name, and killing an in-flight build would be worse than
+        // leaving a stale node running.
+        assert!(c.contains("CommandLine -like '* node*'"), "got {c}");
+        assert!(!c.contains("/IM"), "must not match by image name alone");
+        // Single-quoted throughout, so it survives being passed as one argument.
+        assert!(!c.contains('"'), "got {c}");
+    }
+
+    #[test]
+    fn restart_stops_before_starting_on_every_platform() {
+        // A synthetic plan: only the label and the detached half matter here.
+        let plan = Plan {
+            label: label(),
+            file: None,
+            contents: None,
+            commands: Vec::new(),
+            detached: vec![vec!["launcher".into()]],
+            log: LogSource::File(PathBuf::from("/tmp/x.log")),
+        };
+        let (stop, start) = restart_plan(&plan);
+        let stop_flat: Vec<String> = stop.iter().map(|c| c.join(" ")).collect();
         match Platform::current() {
             // launchd has no restart verb; -k is what makes kickstart replace a
             // running instance rather than no-op.
-            Platform::Macos => assert!(flat[0].contains("kickstart -k"), "got {flat:?}"),
-            // Two steps: rewriting the task definition alone would leave the old
-            // process running until the next logon.
-            Platform::Windows => {
-                assert_eq!(flat.len(), 2, "got {flat:?}");
-                assert!(flat[0].contains("/End"));
-                assert!(flat[1].contains("/Run"));
+            Platform::Macos => {
+                assert!(stop_flat[0].contains("kickstart -k"), "got {stop_flat:?}");
+                assert!(start.is_empty(), "launchd restarts it itself");
             }
-            Platform::Linux => assert!(flat[0].contains("restart")),
+            Platform::Linux => {
+                assert!(stop_flat[0].contains("restart"), "got {stop_flat:?}");
+                assert!(start.is_empty(), "systemd restarts it itself");
+            }
+            // With no supervisor, a restart is only a restart if we start it
+            // again ourselves.
+            Platform::Windows => {
+                assert!(stop_flat[0].contains("Stop-Process"), "got {stop_flat:?}");
+                assert_eq!(start, plan.detached, "must relaunch after stopping");
+            }
         }
+    }
+
+    #[test]
+    fn each_platform_views_its_own_kind_of_log() {
+        let f = LogSource::File(PathBuf::from("/tmp/n.log"));
+        let cmd = f.view_command(true, 20).join(" ");
+        if Platform::current() == Platform::Windows {
+            // Windows has no tail; -Wait is the streaming equivalent.
+            assert!(cmd.contains("Get-Content"), "got {cmd}");
+            assert!(cmd.contains("-Wait") && cmd.contains("-Tail 20"));
+        } else {
+            assert!(cmd.starts_with("tail -f -n 20 "), "got {cmd}");
+        }
+        // Without --follow the streaming flag must be absent.
+        let once = f.view_command(false, 5).join(" ");
+        assert!(!once.contains("-Wait"), "got {once}");
+        assert!(!once.split(' ').any(|w| w == "-f"), "got {once}");
+
+        // The journal is not a file, which is the whole reason for the enum.
+        let j = LogSource::Journal("syncwork-node".into());
+        let jc = j.view_command(true, 20).join(" ");
+        assert!(
+            jc.starts_with("journalctl --user -u syncwork-node.service"),
+            "got {jc}"
+        );
+        assert!(jc.ends_with("-f"));
+        assert!(j.describe().contains("journal"));
     }
 
     #[test]

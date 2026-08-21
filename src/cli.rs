@@ -119,6 +119,15 @@ pub enum ServiceCmd {
     Uninstall,
     /// Report whether the node is registered.
     Status,
+    /// Show the node's log, wherever this platform keeps it.
+    Logs {
+        /// Keep streaming new lines.
+        #[arg(long, short = 'f')]
+        follow: bool,
+        /// How many existing lines to show first.
+        #[arg(long, short = 'n', default_value = "50")]
+        lines: u32,
+    },
 }
 
 /// Locate the repository for a repo-scoped command.

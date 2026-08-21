@@ -104,10 +104,13 @@ Windows 会当场报错，你不会搞错。POSIX 允许替换正在运行的可
 
 所以顺序固定为：**先停节点 → install → 重启节点**。
 
+装了服务的话，一条命令搞定（`restart` 会先停掉旧进程）：
+
 ```bash
-# 节点终端里 Ctrl-C，然后
-git pull && cargo install --path . --locked && sw node
+git pull && cargo install --path . --locked && sw service restart
 ```
+
+前台手动跑节点的话，先在那个终端 Ctrl-C，再 install，再重新 `sw node`。
 
 ## 一次性设置
 
@@ -141,18 +144,25 @@ sw service install           # 注册开机自启
 sw service install --print   # 先看它会做什么，不实际执行
 sw service status            # 是否已注册
 sw service restart           # 更新二进制后用它生效
+sw service logs -f           # 跟踪节点日志（平台差异由它处理）
 sw service uninstall
 ```
 
-**更新完一定要 `sw service restart`。** `install` 不等于重启：Windows 上 `schtasks /Create /F` 只重写任务定义，不会动已经在跑的那个进程，旧二进制会一直服务到下次登录。
+`sw service logs` 省掉了记三个不同答案的麻烦：macOS 是 `~/Library/Logs/` 下的文件，Windows 是 `%LOCALAPPDATA%\syncwork\` 下的文件，Linux 根本不是文件而是 systemd journal。`-f` 跟踪，`-n` 指定回看行数。
+
+**更新完一定要 `sw service restart`。** `install` 不等于重启：它只保证「下次登录会启动新二进制」，不会替换当前正在跑的那个进程。
 
 | 平台 | 机制 |
 |---|---|
 | macOS | launchd LaunchAgent（`~/Library/LaunchAgents`） |
-| Windows | 计划任务，ONLOGON 触发，经 PowerShell `-WindowStyle Hidden` 避免每次登录弹控制台窗口 |
+| Windows | `HKCU\...\CurrentVersion\Run` 注册表值，指向一个隐藏窗口的 `.ps1` 启动脚本 |
 | Linux | systemd user unit |
 
-用户级，不需要管理员权限。安装时会把**当前的 PATH 写进服务定义**：这三种机制启动进程时环境都最小化，一个能启动但找不到 `cargo` 的节点比启动失败更糟 —— 对端连得上，然后报 `cargo: not found`，看起来像项目坏了。
+用户级，全都不需要管理员权限。
+
+Windows 用的是 `Run` 注册表键而不是计划任务：在常见的企业策略下创建带登录触发器的任务会被直接拒绝 —— `schtasks /Create /SC ONLOGON` 返回 `Access is denied`，加 `/RU` `/IT` 也一样。`Run` 键不需要提权。代价是 Windows 上没有守护者，所以 `install` 和 `restart` 会自己把节点拉起来，也没有 keep-alive（macOS 的 launchd 有 `KeepAlive`，Linux 的 systemd 有 `Restart=always`）。
+
+安装时会把**当前的 PATH 写进服务定义**：这三种机制启动进程时环境都最小化，一个能启动但找不到 `cargo` 的节点比启动失败更糟 —— 对端连得上，然后报 `cargo: not found`，看起来像项目坏了。
 
 调试时也可以前台跑：`sw node`。
 
