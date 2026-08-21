@@ -508,8 +508,19 @@ pub fn restart() -> Result<()> {
 ///
 /// Exists so nobody has to remember three different answers: a file under
 /// `~/Library/Logs`, a file under `%LOCALAPPDATA%`, or a systemd journal unit.
-pub fn logs(follow: bool, lines: u32) -> Result<()> {
+pub fn logs(follow: bool, lines: u32, path_only: bool) -> Result<()> {
     let plan = build_plan()?;
+    if path_only {
+        // Printed so a caller can follow the log with its own tool. That matters
+        // on Windows: a long-running `sw` holds an open handle on the installed
+        // binary, which makes the next `cargo install` fail — so the update
+        // script must not end with `sw` still running.
+        match &plan.log {
+            LogSource::File(p) => println!("{}", p.display()),
+            LogSource::Journal(unit) => println!("journalctl --user -u {unit}.service"),
+        }
+        return Ok(());
+    }
     let cmd = plan.log.view_command(follow, lines);
     eprintln!("{} {}", "log".bold(), plan.log.describe().dimmed());
     // stdio is inherited so `--follow` streams instead of buffering.

@@ -38,7 +38,11 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                 ServiceCmd::Start => service::start()?,
                 ServiceCmd::Uninstall => service::uninstall()?,
                 ServiceCmd::Status => service::status()?,
-                ServiceCmd::Logs { follow, lines } => service::logs(follow, lines)?,
+                ServiceCmd::Logs {
+                    follow,
+                    lines,
+                    path,
+                } => service::logs(follow, lines, path)?,
             }
             Ok(0)
         }

@@ -43,4 +43,9 @@ sw service status
 
 step "following the log"
 warn "ctrl-c stops watching; the node keeps running"
-sw service logs -f
+# Followed with tail rather than `sw service logs -f` on purpose: a long-running
+# `sw` keeps an open handle on the installed binary, which would make the *next*
+# run of this script fail at `cargo install`. Asking for the path and tailing it
+# ourselves leaves no `sw` process behind, so the script stays re-runnable.
+LOG="$(sw service logs --path)" || die "could not locate the log"
+exec tail -f -n 50 "$LOG"

@@ -13,8 +13,10 @@
 use super::ALPN;
 use crate::config::{Identity, Machine, Peer};
 use anyhow::{Context, Result, bail};
+use iroh::TransportAddr;
 use iroh::endpoint::presets;
 use iroh::{Endpoint, EndpointId};
+use std::collections::BTreeMap;
 use std::str::FromStr;
 
 /// Bind the local endpoint using the persistent identity.
@@ -69,22 +71,87 @@ pub async fn connect(ep: &Endpoint, peer: &Peer) -> Result<iroh::endpoint::Conne
     })
 }
 
+/// Resolved relay addresses, cached for the life of the process.
+///
+/// A relay path reports a URL, not an address — and an address is exactly what
+/// you need when a firewall is in the way. The lookup is cached because this
+/// runs on every served request while the answer does not change within a run.
+static RELAY_IPS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, String>>> =
+    std::sync::OnceLock::new();
+
+/// Resolve a relay host to a comma-separated list of addresses.
+///
+/// Best-effort and explicitly labelled as a lookup rather than the socket in use:
+/// iroh does not expose the relay connection's own address, and a relay hostname
+/// may answer with several records. Useful for "which address do I allow through
+/// the firewall", not as proof of which one carried the bytes.
+async fn relay_addrs(host: &str) -> String {
+    let cache = RELAY_IPS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()));
+    if let Ok(guard) = cache.lock()
+        && let Some(hit) = guard.get(host)
+    {
+        return hit.clone();
+    }
+
+    let resolved = match tokio::net::lookup_host((host, 443)).await {
+        Ok(addrs) => {
+            let mut ips: Vec<String> = addrs.map(|a| a.ip().to_string()).collect();
+            ips.sort();
+            ips.dedup();
+            if ips.is_empty() {
+                "unresolved".to_string()
+            } else {
+                ips.join(",")
+            }
+        }
+        Err(_) => "unresolved".to_string(),
+    };
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(host.to_string(), resolved.clone());
+    }
+    resolved
+}
+
 /// Describe the live network paths of a connection: relay or direct, the remote
-/// transport address, and the round-trip time.
+/// address, and the round-trip time.
 ///
 /// A connection starts out relayed and gains a direct path once holepunching
 /// succeeds, so this also answers "is my traffic actually going peer-to-peer?"
-/// — which is otherwise invisible.
-pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
+/// — which is otherwise invisible. The selected path is marked `*`.
+pub async fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
+    // Collected first so the borrow of `paths()` is not held across the DNS
+    // await below.
+    struct Seen {
+        selected: bool,
+        relay_host: Option<String>,
+        shown: String,
+        rtt_ms: u128,
+    }
+    let seen: Vec<Seen> = conn
+        .paths()
+        .iter()
+        .map(|p| Seen {
+            selected: p.is_selected(),
+            relay_host: match p.remote_addr() {
+                TransportAddr::Relay(url) => url.host_str().map(|h| h.to_string()),
+                _ => None,
+            },
+            shown: p.remote_addr().to_string(),
+            rtt_ms: p.rtt().as_millis(),
+        })
+        .collect();
+
     let mut parts: Vec<String> = Vec::new();
-    for p in conn.paths().iter() {
-        let kind = if p.is_relay() { "relay" } else { "direct" };
-        let selected = if p.is_selected() { "*" } else { "" };
-        parts.push(format!(
-            "{selected}{kind} {} {}ms",
-            p.remote_addr(),
-            p.rtt().as_millis()
-        ));
+    for s in seen {
+        let mark = if s.selected { "*" } else { "" };
+        match &s.relay_host {
+            Some(host) => parts.push(format!(
+                "{mark}relay {host} [{}] {}ms",
+                relay_addrs(host).await,
+                s.rtt_ms
+            )),
+            None => parts.push(format!("{mark}{} {}ms", s.shown, s.rtt_ms)),
+        }
     }
     if parts.is_empty() {
         "no path".into()
@@ -93,26 +160,38 @@ pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
     }
 }
 
-/// Open a request stream, translating a refusal into something actionable.
+/// Explain a refusal, if that is what closed the connection.
 ///
-/// When the far node does not recognise our key it closes the connection with
-/// the reason `unpaired`, which iroh reports as `closed by peer: unpaired
-/// (code 1)`. That is accurate and useless: the interesting part is *why* a
-/// machine that was paired no longer recognises us, and what to do about it.
+/// The far node closes with the reason `unpaired` when it does not recognise our
+/// key. That surfaces two different ways depending on timing — as an error from
+/// `open_bi`, or as a clean end-of-stream once the request is already in flight —
+/// so both paths have to consult the same place. Getting only one of them was how
+/// `sw status` came to report `unexpected reply from peer: None`, which says
+/// nothing about the actual problem.
+pub fn refusal(conn: &iroh::endpoint::Connection) -> Option<String> {
+    let reason = conn.close_reason()?.to_string();
+    if !reason.contains("unpaired") {
+        return None;
+    }
+    Some(
+        "the peer refused us as unpaired. Its record of this machine's key is stale — \
+         most often because this machine's identity was regenerated, or because the \
+         pairing was done from a shell that resolves a different config directory. \
+         Re-pair: `sw pair init` here, `sw pair join <ticket>` there. `sw pair list` \
+         on both sides shows the keys each expects."
+            .to_string(),
+    )
+}
+
+/// Open a request stream, translating a refusal into something actionable.
 pub async fn open_request(
     conn: &iroh::endpoint::Connection,
 ) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
     match conn.open_bi().await {
         Ok(pair) => Ok(pair),
         Err(e) => {
-            let text = e.to_string();
-            if text.contains("unpaired") {
-                bail!(
-                    "the peer refused us as unpaired. Its record of this machine's key is \
-                     stale — most often because this machine's identity was regenerated. \
-                     Re-pair: run `sw pair init` here, `sw pair join <ticket>` there. \
-                     `sw pair list` on both sides shows the keys they expect."
-                )
+            if let Some(explained) = refusal(conn) {
+                bail!("{explained}")
             }
             Err(anyhow::Error::new(e).context("could not open a request stream"))
         }

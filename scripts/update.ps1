@@ -49,4 +49,9 @@ sw service status
 
 Step "following the log"
 Warn "ctrl-c stops watching; the node keeps running"
-sw service logs -f
+# Followed with Get-Content rather than `sw service logs -f` on purpose: Windows
+# will not replace a running executable, so a lingering `sw` here makes the *next*
+# run of this script fail at `cargo install`. This script hit exactly that.
+$log = sw service logs --path
+if ($LASTEXITCODE -ne 0) { Die "could not locate the log" }
+Get-Content -Path $log -Tail 50 -Wait

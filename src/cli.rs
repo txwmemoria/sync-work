@@ -132,6 +132,10 @@ pub enum ServiceCmd {
         /// How many existing lines to show first.
         #[arg(long, short = 'n', default_value = "50")]
         lines: u32,
+        /// Print where the log lives and exit, for following it with your own
+        /// tool. On Windows a long-running `sw` blocks the next `cargo install`.
+        #[arg(long)]
+        path: bool,
     },
 }
 

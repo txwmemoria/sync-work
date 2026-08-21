@@ -96,7 +96,7 @@ async fn handle_connection(conn: Connection) -> Result<()> {
 
     // Re-read so a machine paired since startup is recognised immediately.
     let machine = Machine::load()?;
-    let paths = transport::describe_paths(&conn);
+    let paths = transport::describe_paths(&conn).await;
     let (peer_name, _peer) = match transport::authorize(&machine, remote) {
         Ok(v) => v,
         Err(_) => {
@@ -139,7 +139,7 @@ async fn handle_connection(conn: Connection) -> Result<()> {
         // actually travelled peer-to-peer.
         tracing::info!(
             "{peer_name}: served via {}",
-            transport::describe_paths(&conn)
+            transport::describe_paths(&conn).await
         );
     }
 }
@@ -308,12 +308,21 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
             // Read after the exchange, not before: a connection begins relayed and
             // only gains a direct path once holepunching succeeds, so sampling it
             // immediately after `connect` would almost always say "relay".
-            println!("  path     {}", transport::describe_paths(&conn));
+            println!("  path     {}", transport::describe_paths(&conn).await);
             Ok(())
         }
         Some(Event::Failed { message }) => {
             println!("{}", "error".red().bold());
             bail!("{message}")
+        }
+        None => {
+            println!("{}", "error".red().bold());
+            // A clean end of stream with nothing on it is what a refusal looks
+            // like once the request is already in flight.
+            match transport::refusal(&conn) {
+                Some(explained) => bail!("{explained}"),
+                None => bail!("peer closed the connection without replying"),
+            }
         }
         other => bail!("unexpected reply from peer: {other:?}"),
     }
