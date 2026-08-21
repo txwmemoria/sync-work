@@ -17,9 +17,11 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
 
     match cmd {
         PairCmd::Init { name } => {
-            let ep = transport::bind(&identity).await?;
-            let ticket = transport::local_ticket(&ep, &machine, name).await?;
-            ep.close().await;
+            let ticket = transport::with_endpoint(&identity, |ep| {
+                let machine = &machine;
+                async move { transport::local_ticket(&ep, machine, name).await }
+            })
+            .await?;
 
             // Remember whatever name we just published, so the peer's view and
             // ours agree from here on.
@@ -40,9 +42,11 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
                 bail!("that ticket is from this machine");
             }
 
-            let ep = transport::bind(&identity).await?;
-            let mine = transport::local_ticket(&ep, &machine, name).await?;
-            ep.close().await;
+            let mine = transport::with_endpoint(&identity, |ep| {
+                let machine = &machine;
+                async move { transport::local_ticket(&ep, machine, name).await }
+            })
+            .await?;
 
             // Peer names are table keys on both sides; two machines sharing one
             // would make the pairing ambiguous.

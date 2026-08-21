@@ -18,7 +18,10 @@ use iroh::{Endpoint, EndpointId};
 use std::str::FromStr;
 
 /// Bind the local endpoint using the persistent identity.
-pub async fn bind(identity: &Identity) -> Result<Endpoint> {
+///
+/// Deliberately private: [`with_endpoint`] is the only way to obtain an endpoint,
+/// which makes it impossible for a caller to skip the close.
+async fn bind(identity: &Identity) -> Result<Endpoint> {
     let ep = Endpoint::builder(presets::N0)
         .secret_key(identity.secret.clone())
         .alpns(vec![ALPN.to_vec()])
@@ -26,6 +29,30 @@ pub async fn bind(identity: &Identity) -> Result<Endpoint> {
         .await
         .context("failed to bind iroh endpoint")?;
     Ok(ep)
+}
+
+/// Bind, run `f`, and close — whatever `f` returns.
+///
+/// The manual `bind` / `close` pairing is easy to get wrong, because the failure
+/// is silent in the happy case and only shows up as library noise stamped on top
+/// of a real error message. Wrapping it means the close cannot be skipped by an
+/// early return, so there is one less way to produce output like:
+///
+/// ```text
+/// ERROR iroh::socket: Endpoint dropped without calling `Endpoint::close`.
+/// error: no peers paired yet; run `sw pair init` on one machine
+/// ```
+pub async fn with_endpoint<T, F, Fut>(identity: &Identity, f: F) -> Result<T>
+where
+    F: FnOnce(Endpoint) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let ep = bind(identity).await?;
+    // Endpoint is a cheap handle; the clone lets `f` own one while this scope
+    // keeps the one it closes.
+    let out = f(ep.clone()).await;
+    ep.close().await;
+    out
 }
 
 /// Connect to a peer. Falls back from the address hint to discovery-by-id,

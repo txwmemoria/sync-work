@@ -36,10 +36,10 @@ pub async fn sync(repo: &Path, opts: Options) -> Result<i32> {
         bail!("nothing to sync: [context] has claude = false and no extra paths");
     }
 
-    let ep = transport::bind(&identity).await?;
-    let out = sync_with(&ep, &cfg, &peer, &peer_name, &roots, &opts).await;
-    ep.close().await;
-    out
+    transport::with_endpoint(&identity, |ep| async move {
+        sync_with(&ep, &cfg, &peer, &peer_name, &roots, &opts).await
+    })
+    .await
 }
 
 async fn sync_with(

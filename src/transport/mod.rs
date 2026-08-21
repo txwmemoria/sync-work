@@ -5,7 +5,7 @@ pub mod frame;
 pub mod message;
 pub mod ticket;
 
-pub use endpoint::{authorize, bind, connect};
+pub use endpoint::{authorize, connect, with_endpoint};
 pub use frame::{read_event, read_frame, read_json, write_frame, write_json};
 pub use message::{
     ALPN, CtxEntry, CtxFrame, CtxRoot, Diagnostic, Event, PROTOCOL_VERSION, Request, VerifyRequest,

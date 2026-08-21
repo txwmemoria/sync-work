@@ -49,12 +49,10 @@ pub async fn run(repo: &Path, opts: Options) -> Result<i32> {
         None => git::head_sha(repo).await?,
     };
 
-    let ep = transport::bind(&identity).await?;
-    // iroh logs an error if an endpoint is dropped without a graceful close, so
-    // the result is held rather than propagated until the shutdown has run.
-    let out = verify_against(&ep, repo, &cfg, &peer, &peer_name, &base, &opts).await;
-    ep.close().await;
-    out
+    transport::with_endpoint(&identity, |ep| async move {
+        verify_against(&ep, repo, &cfg, &peer, &peer_name, &base, &opts).await
+    })
+    .await
 }
 
 async fn verify_against(

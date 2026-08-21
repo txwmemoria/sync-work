@@ -80,6 +80,19 @@ for name in widget gadget; do
 done
 echo ok
 
+step "an unpaired machine reports cleanly, with no library noise"
+# A third home that never gets paired — the state a first-time user is in.
+mkdir -p "$LAB/hC"
+(cd "$LAB" && SW_HOME="$LAB/hC" "$SW" status) > "$LAB/unpaired.out" 2> "$LAB/unpaired.err"
+RC=$?
+[ $RC -ne 0 ] || fail "status on an unpaired machine should exit non-zero"
+grep -q "sw pair init" "$LAB/unpaired.err" || { cat "$LAB/unpaired.err"; fail "error does not say how to fix it"; }
+# The endpoint must not be bound at all when there is nobody to dial; binding and
+# then returning early makes iroh stamp its own error over the real message.
+grep -q "Endpoint dropped" "$LAB/unpaired.err" \
+  && { cat "$LAB/unpaired.err"; fail "iroh shutdown noise leaked into the error"; }
+echo "PASS clean error, exit $RC"
+
 # ---------------------------------------------------------------- pairing
 step "pair the MACHINES once, from outside any repository"
 # $LAB is deliberately not a git repo: machine-scoped commands must not need one.
@@ -104,7 +117,10 @@ echo ok
 
 # ---------------------------------------------------------------- node
 step "start ONE node on B, serving every linked project"
-(cd "$LAB" && SW_HOME="$LAB/hB" CLAUDE_CONFIG_DIR="$LAB/claudeB" "$SW" node \
+# `exec` matters: without it $! is the subshell's pid, and killing that leaves the
+# node orphaned — holding file handles under $LAB and, worse, still answering
+# requests during later runs. With exec the subshell *becomes* the node.
+(cd "$LAB" && exec env SW_HOME="$LAB/hB" CLAUDE_CONFIG_DIR="$LAB/claudeB" "$SW" node \
    > "$LAB/node.log" 2>&1) &
 NODE_PID=$!
 for _ in $(seq 1 60); do

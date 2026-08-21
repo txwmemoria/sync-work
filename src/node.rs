@@ -26,14 +26,18 @@ use std::path::Path;
 pub async fn serve() -> Result<()> {
     let machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
-    let ep = transport::bind(&identity).await?;
+    let id = identity.id_string();
+    transport::with_endpoint(
+        &identity,
+        |ep| async move { accept_loop(ep, machine, id).await },
+    )
+    .await
+}
+
+async fn accept_loop(ep: iroh::Endpoint, machine: Machine, id: String) -> Result<()> {
     ep.online().await;
 
-    eprintln!(
-        "{} {}",
-        "node".green().bold(),
-        identity.id_string().dimmed()
-    );
+    eprintln!("{} {}", "node".green().bold(), id.dimmed());
     eprintln!("  name     {}", machine.node_name());
     eprintln!("  platform {}", Platform::current());
     if machine.peers.is_empty() {
@@ -208,7 +212,6 @@ async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Resul
 pub async fn ping(peer_name: Option<&str>) -> Result<()> {
     let machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
-    let ep = transport::bind(&identity).await?;
 
     println!("{} {}", "this machine".bold(), machine.node_name());
     println!("  id       {:.16}…", identity.id_string());
@@ -227,14 +230,16 @@ pub async fn ping(peer_name: Option<&str>) -> Result<()> {
         }
     );
 
+    // Resolved before binding. On an unpaired machine — which is exactly the
+    // state `sw status` gets run in first — there is nobody to dial, so opening a
+    // socket only to fail would be wasted work and would report the failure
+    // underneath a line of iroh's own shutdown noise.
     let (name, peer) = machine.resolve_peer(peer_name)?;
     print!("{} {} ... ", "peer".bold(), name);
     use std::io::Write;
     std::io::stdout().flush().ok();
 
-    let out = ping_peer(&ep, &peer).await;
-    ep.close().await;
-    out
+    transport::with_endpoint(&identity, |ep| async move { ping_peer(&ep, &peer).await }).await
 }
 
 async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()> {
