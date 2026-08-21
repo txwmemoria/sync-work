@@ -1,0 +1,300 @@
+# sw — 对等跨平台构建验证
+
+一个**通用工具**，管理你任意数量的 git 仓库。两台机器（Windows / macOS）各跑一个 `sw`，互相帮对方编译验证。**没有主机概念**，任意一方都能发起。
+
+核心特性：**不需要 commit，不需要 push**。`sw verify` 把当前工作区（含未暂存、未跟踪的改动）打成 patch，经加密 P2P 通道送到对端的独立 worktree 构建，日志流式回传，**退出码原样透传**。
+
+```
+$ cd ~/projects/myapp && sw verify
+verify mac-mini  ci  4bbd58fa2869 + 3 files (12.4 KiB → 3.1 KiB)
+  on mac-mini (macos)  /Users/me/code/myapp
+  › reusing worktree
+  › applying patch
+  › [1/2] cargo build --release --all-targets
+error[E0308]: mismatched types
+ --> src/net.rs:88:21
+  ...
+fail mac-mini exit 1 in 4.2s (1 error, 0 warnings)
+
+$ echo $?
+1
+```
+
+退出码透传是整个设计的关键：`sw verify` 能像任何本地构建命令一样组合进 `&&` 链、git hook，或者交给 AI 工具驱动「改 → 远端验 → 读错误 → 再改」的闭环，不需要人转述失败信息。
+
+## 两层模型（先看这个）
+
+配置分两层，这个划分决定了整个工具的形状：
+
+| 存放位置 | 内容 | 作用域 |
+|---|---|---|
+| `~/.config/syncwork/config.toml` | 本机名字、已配对的机器、**项目名 → 本机路径** 的注册表 | 机器 |
+| `~/.config/syncwork/identity.key` | 私钥（唯一的秘密） | 机器 |
+| `<仓库>/syncwork.toml`（进 git） | 项目名、构建配方、上下文选项 | 仓库 |
+
+由此得到：
+
+- **两台机器只配对一次**，不是每个仓库配一次。
+- **每台机器只跑一个 `sw node`**，服务它注册的所有项目。
+- **只装一次开机自启**，加新项目不用碰服务。
+- 仓库里提交的 `syncwork.toml` **不含任何机器信息**，所以两边读到的完全一样。
+
+项目靠 `syncwork.toml` 里的**项目名**跨机器对应。路径由每台机器各自记录 —— 绝对路径从不上网络。
+
+命令也分两层：
+
+- **机器级**（在任何目录都能跑，不需要在仓库里）：`pair`、`node`、`service`、`projects`、`status`
+- **仓库级**（从当前目录或 `-C` 发现仓库）：`init`、`link`、`verify`、`ctx`
+
+## 安装
+
+两台机器都要装。需要 Rust 1.90+ 和 git。
+
+```bash
+cargo install --path .
+```
+
+或直接用 `target/release/sw`（单文件，无运行时依赖）。
+
+## 一次性设置
+
+### 1. 配对两台机器（就这一次）
+
+在任何目录跑，不需要在仓库里：
+
+```bash
+# 机器 A
+sw pair init
+#   → 打印 sw1:XXXX...，复制它
+
+# 机器 B
+sw pair join sw1:XXXX...
+#   → 打印另一个 ticket，复制回来
+
+# 机器 A
+sw pair join sw1:YYYY...
+```
+
+ticket 里只有公钥、机器名和平台 —— 没有路径、没有项目名。所以这一次配对覆盖你之后所有的项目。
+
+```bash
+sw pair list      # 确认
+```
+
+### 2. 装开机自启（每台机器一次）
+
+```bash
+sw service install
+sw service install --print   # 先看它会做什么
+```
+
+| 平台 | 机制 |
+|---|---|
+| macOS | launchd LaunchAgent（`~/Library/LaunchAgents`） |
+| Windows | 计划任务，ONLOGON 触发，经 PowerShell `-WindowStyle Hidden` 避免每次登录弹控制台窗口 |
+| Linux | systemd user unit |
+
+用户级，不需要管理员权限。安装时会把**当前的 PATH 写进服务定义**：这三种机制启动进程时环境都最小化，一个能启动但找不到 `cargo` 的节点比启动失败更糟 —— 对端连得上，然后报 `cargo: not found`，看起来像项目坏了。
+
+调试时也可以前台跑：`sw node`。
+
+## 接入一个仓库
+
+对每个想跨平台验证的项目做一次。
+
+```bash
+# 机器 A，在项目里
+cd ~/projects/myapp
+sw init
+```
+
+生成 `syncwork.toml` 并把 `.sw/` 加进 `.gitignore`。按需改配方，然后提交：
+
+```toml
+[project]
+name = "myapp"
+remote = "origin"
+
+[recipes.ci]
+steps = ["cargo build --release --all-targets", "cargo test --all"]
+
+[recipes.ci.windows]        # 只在需要时覆盖平台差异
+steps = ["cargo build --release", "cargo test --all -- --test-threads=1"]
+env = { CC = "clang-cl" }
+```
+
+```bash
+# 机器 B，在同一项目的检出里
+cd ~/code/myapp && git pull
+sw link
+```
+
+`sw link` 把「项目名 → 本机路径」记进机器注册表。两边路径可以完全不同，这正是它记在本机而不是仓库里的原因。
+
+```bash
+sw projects      # 看本机注册了哪些
+sw unlink myapp  # 取消
+```
+
+配方提交进 git，两台机器读同一份 —— 这是「双端执行相同脚本」的保证，而不是靠人手工对齐。支持的平台覆盖键：`windows` / `macos` / `linux`；覆盖块里 `steps` 整体替换，`env` 与基础配置合并。
+
+## 日常使用
+
+```bash
+sw verify              # 用默认配方 ci 在对端验证当前工作区
+sw verify check        # 换配方
+sw verify --peer mac   # 超过两台机器时指定目标
+sw verify --base HEAD~3   # 换基准 commit
+sw verify --push       # 顺手把分支推到 GitLab（通常不需要）
+sw status              # 对端是否在线、它服务哪些项目
+```
+
+`verify` 和 `ctx` 会自动把当前仓库登记到本机注册表，所以发起方那侧不必先手动 `sw link`。对端仍然需要 —— 如果没做，你会看到：
+
+```
+error: project `myapp` is not linked on mac-mini — run `sw link` in your clone of it there
+```
+
+## AI 上下文同步
+
+代码走 git，但 AI 工具在仓库**之外**保存的东西不会走 —— Claude Code 的会话记录和 memory 都在 `~/.claude/projects/` 下。换台机器，上下文就没了。
+
+```bash
+sw ctx              # 双向同步（按当前项目）
+sw ctx --dry-run    # 只看会动什么
+```
+
+同步完在另一台机器上 `/resume` 就能看到这台的会话，memory 也一并共享。每个项目的上下文独立，互不串台。
+
+### 路径推导
+
+Claude Code 按项目**绝对路径**命名它的状态目录，把 `[A-Za-z0-9-]` 之外的字符全替换成 `-`：
+
+```
+D:\projects\sync-work    ->  D--projects-sync-work
+/Users/me/projects/app   ->  -Users-me-projects-app
+```
+
+所以两台机器对这个目录名的看法必然不同。`sw ctx` 不在网络上传绝对路径 —— 每一侧从**自己的**检出路径推导**自己的**目录名，线上只传逻辑根名（`claude`）和相对路径。顺带一个好处：因为 `:`、`/`、`\` 都映射成 `-`，`git rev-parse` 在 Windows 上返回正斜杠这件事完全不影响结果。
+
+### 合并规则
+
+mtime 新的一方胜出。但在覆盖失败方之前，会**在本地**比较两者字节：如果失败方是胜出方的前缀，说明胜出方只是它的追加延续（append-only 会话记录的正常情况），覆盖是无损的，直接写。只有真正分叉的文件才会留下 `.conflict-<host>-<时间戳>` 副本。**任何情况下都不丢数据。**
+
+写入时会把发送方的 mtime 一起带过去。少了这一步，刚写入的副本看起来更新，下次同步会把它推回去，来回弹跳永不收敛。
+
+`quiet_secs`（默认 5 秒）内被改过的文件会跳过 —— 大概率正在被一个活跃会话追加写入。
+
+```toml
+[context]
+claude = true       # 同步 Claude Code 会话与 memory
+extra = []          # 额外的仓库相对目录（git 不跟踪的状态）
+quiet_secs = 5
+```
+
+**注意**：同一时刻只在一台机器上开同一个项目的会话。两边同时写必然分叉，工具会保住两份并告警，但那需要你手工处理。
+
+## 工作原理
+
+```
+        Windows                                        Mac
+┌────────────────────────┐                  ┌────────────────────────┐
+│ sw verify (在 myapp 里) │                  │ sw node (每台机器一个)  │
+│  1 扫描工作区           │                  │                        │
+│    临时 index，不碰你的  │                  │                        │
+│    暂存区               │                  │  2 查注册表：           │
+│  2 diff → zstd  ────────┼──── iroh QUIC ──▶│    myapp -> ~/code/myapp│
+│    + 项目名             │    公钥认证/加密   │  3 checkout base       │
+│                        │                  │    git apply patch     │
+│  6 日志/诊断/退出码 ◀───┼─── 流式事件 ──────┤  4 跑配方              │
+└────────────────────────┘                  │  5 .sw/wt/<peer>/       │
+                                            └────────────────────────┘
+```
+
+几个刻意的设计选择：
+
+**快照用临时 index。** `sw verify` 绝不动你真实的暂存区 —— 在准备 commit 的过程中被工具改了 staging area 是不可接受的意外。
+
+**worktree 复用而非重建。** 对端在 `<仓库>/.sw/wt/<peer>/` 保留一个持久 worktree，`target/` 缓存因此存活。这是远端验证能进内层开发循环而不是感觉像 CI 的原因。清理用 `git clean -fd`（**没有** `-x`）：上一次 patch 的残留文件被清掉，被 ignore 的构建产物保留。因为 patch 本身永不包含被 ignore 的文件，这个语义是自洽的。
+
+**诊断结构化。** 配方里的 cargo 命令会被自动注入 `--message-format=json-diagnostic-rendered-ansi`（`cargo test --all -- --nocapture` 这类带 `--` 的会正确插在分隔符之前）。每行 stdout 先尝试按 cargo JSON 解析，成功就转成带 `file:line` 的结构化诊断，失败就当普通日志透传 —— 这样 `cargo test` 混合输出也能正确处理。
+
+**授权就是对等表。** iroh 连接天生经过公钥认证（remote id 就是完成 QUIC 握手的那把公钥），所以「id 在本机对等表里」就是充分的鉴权。没有 token 需要轮转或泄漏。未配对的连接直接关闭，不回复任何信息。
+
+**路径不过网络。** 请求里只有项目名。对端在自己的注册表里查自己的路径，还会核对那个检出的 `syncwork.toml` 里的项目名是否匹配，防止注册表过期指向别的项目。peer 提供的相对路径在落盘前逐段校验，不能逃出根目录。
+
+**base commit 缺失时自动回退。** 如果对端没有你的 HEAD（本地独有的 commit），它会先 `git fetch`；仍然没有就回报，客户端自动改用与远端的 merge-base 重新快照并加宽 patch。所以本地独有 commit 也不需要 push。
+
+## 环境变量
+
+| 变量 | 作用 |
+|---|---|
+| `SW_HOME` | 覆盖机器状态目录（身份 + 配置）。同一台机器上跑多个独立节点时用（端到端测试即靠它）。 |
+| `SW_LOG` | `tracing` 过滤器，如 `SW_LOG=debug`。默认 `warn`。 |
+| `SW_REMOTE` | 由 `sw` 注入到配方步骤中，值为 `1`。配方可用它区分远端执行。 |
+| `NO_COLOR` | 关闭着色。非终端输出本来就不着色。 |
+| `CLAUDE_CONFIG_DIR` | 覆盖 `~/.claude` 的位置，`sw ctx` 会遵循。 |
+
+## 源码结构
+
+```
+src/
+├── main.rs           入口：初始化着色、解析参数、分发
+├── cli.rs            命令行定义（只有定义，没有实现）
+├── commands/         本地事务性命令
+│   ├── pair.rs       机器配对
+│   └── project.rs    init / link / unlink / projects
+├── config/           两层配置
+│   ├── platform.rs   宿主平台（不是配置，是关于宿主的事实）
+│   ├── repo.rs       syncwork.toml：项目名、配方
+│   └── machine.rs    机器状态：身份、对等表、项目注册表
+├── transport/        线路层
+│   ├── message.rs    Request / Event / CtxFrame
+│   ├── frame.rs      长度前缀分帧
+│   ├── endpoint.rs   绑定、拨号、鉴权
+│   └── ticket.rs     配对 ticket
+├── node.rs           常驻接受循环；只做路由
+├── verify/           远端构建验证
+│   ├── client.rs     发起方
+│   ├── server.rs     节点方
+│   └── exec.rs       配方执行（只有 server 用它）
+├── ctx/              AI 上下文同步
+│   ├── roots.rs      路径推导
+│   ├── scan.rs       扫描成 manifest、路径校验
+│   ├── merge.rs      合并策略（前缀检测、冲突保留）
+│   ├── client.rs     发起方
+│   └── server.rs     节点方
+├── git.rs            git 管道：快照、worktree、patch
+├── service.rs        开机自启
+└── style.rs          终端着色，非终端时关闭
+```
+
+一个刻意的安排：**`verify/` 和 `ctx/` 各自同时拥有自己的两端**。重构前 verify 的服务端在 `node.rs` 里，而 ctx 的服务端在 `ctxwire.rs` 里 —— 同一种东西放在两个地方。改动任一侧的交互几乎必然要同时动两端，把它们分开放是在邀请二者漂移。
+
+`node.rs` 现在只是路由器，不含任何一种请求的实现。`exec` 放进 `verify/` 是因为只有它的服务端用得到。`config/platform.rs` 单独拆出来是因为平台不是配置 —— 它是关于宿主的事实，配方、服务安装和线路协议都要查它。
+
+没有为了"设计模式"而加的 trait 抽象或间接层。这里的优雅是对称和内聚。
+
+## 测试
+
+```bash
+cargo test          # 35 个单元测试
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，18 项检查
+```
+
+端到端覆盖单元测试到不了的部分：机器级配对、项目注册表、QUIC 传输、patch 传递、worktree 隔离、诊断回传、退出码透传、上下文同步。其中两项专门锁住本工具的核心主张 —— **两个项目共用一个节点和一次配对**，以及**对端未 link 时给出可操作的错误**。
+
+## 已知边界
+
+- **真实 Windows↔Mac 路径尚未实测。** 端到端测试的两个节点跑在同一台 Windows 上（靠 `SW_HOME` 区分身份）。平台相关代码都在，但没有对着真 Mac 跑过。
+- **跨网络 NAT 穿透尚未实测。** 同上，两个节点同机，iroh 的 relay / 打洞路径没被真正走到。同局域网应当直接可用。
+- **`sw ctx` 要求同一时刻只有一台机器在写。** 见上方合并规则。
+- **日志按行发帧**，几万行输出的构建会产生对应数量的 QUIC 帧。能用，但没有批量化。
+- **`sw service install` 的实际注册未在本机验证** —— 生成的 plist / schtasks 命令行有单元测试覆盖，但没有真的在这台机器上注册开机自启。
+
+## 路线
+
+- `sw tui` — ratatui 面板，机器状态、项目列表与构建历史
+- `sw ctx --watch` — 会话结束时自动同步，而不是手动触发
+- 日志分帧批量化
+- 超过两台机器时的扇出验证（`sw verify --all`）

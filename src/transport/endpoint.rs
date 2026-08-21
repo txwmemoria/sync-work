@@ -1,0 +1,82 @@
+//! Binding, dialling, and authorisation.
+//!
+//! There is no server and no central registry. Each machine holds one long-lived
+//! keypair and a peer is simply a public key; both machines run the identical
+//! binary and either may initiate.
+//!
+//! Authorisation is deliberately crude and strong: a request is served only if
+//! the connection's remote id appears in this machine's peer table. An iroh
+//! connection is authenticated by construction — the remote id *is* the public
+//! key that terminated the QUIC handshake — so matching against that table is
+//! sufficient. There is no token to leak or rotate.
+
+use super::ALPN;
+use crate::config::{Identity, Machine, Peer};
+use anyhow::{Context, Result, bail};
+use iroh::endpoint::presets;
+use iroh::{Endpoint, EndpointId};
+use std::str::FromStr;
+
+/// Bind the local endpoint using the persistent identity.
+pub async fn bind(identity: &Identity) -> Result<Endpoint> {
+    let ep = Endpoint::builder(presets::N0)
+        .secret_key(identity.secret.clone())
+        .alpns(vec![ALPN.to_vec()])
+        .bind()
+        .await
+        .context("failed to bind iroh endpoint")?;
+    Ok(ep)
+}
+
+/// Connect to a peer. Falls back from the address hint to discovery-by-id,
+/// because a hint recorded at pairing time goes stale when a laptop changes
+/// network, while the id never does.
+pub async fn connect(ep: &Endpoint, peer: &Peer) -> Result<iroh::endpoint::Connection> {
+    let id = EndpointId::from_str(&peer.id)
+        .with_context(|| format!("peer id `{}` is not a valid endpoint id", peer.id))?;
+    ep.connect(id, ALPN).await.with_context(|| {
+        format!(
+            "could not reach peer {:.12}; is `sw node` running there?",
+            peer.id
+        )
+    })
+}
+
+/// Reject a connection whose remote key is not in this machine's peer table.
+pub fn authorize(machine: &Machine, remote: EndpointId) -> Result<(String, Peer)> {
+    let remote = remote.to_string();
+    match machine.peers.iter().find(|(_, p)| p.id == remote) {
+        Some((name, p)) => Ok((name.clone(), p.clone())),
+        None => bail!("unpaired peer {remote:.12} attempted a request"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Platform;
+    use crate::transport::Ticket;
+
+    fn sample() -> Ticket {
+        Ticket {
+            // A syntactically valid ed25519 public key in iroh's hex form.
+            id: "0".repeat(64),
+            name: "mac-mini".into(),
+            platform: Platform::Macos,
+            addr: None,
+        }
+    }
+
+    #[test]
+    fn authorize_admits_only_the_paired_key() {
+        let mut m = Machine::default();
+        m.peers.insert("mac".into(), sample().as_peer());
+
+        let paired = EndpointId::from_str(&"0".repeat(64)).unwrap();
+        assert_eq!(authorize(&m, paired).unwrap().0, "mac");
+
+        // Any other key, however well-formed, is refused.
+        let stranger = iroh::SecretKey::generate().public();
+        assert!(authorize(&m, stranger).is_err());
+    }
+}

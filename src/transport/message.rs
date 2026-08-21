@@ -1,0 +1,207 @@
+//! Messages exchanged over the wire.
+//!
+//! One bi-directional stream per request. The control plane is length-prefixed
+//! JSON so it stays readable in a packet dump; bulk bodies (a patch, a context
+//! file) travel as their own raw frames so nothing pays base64 overhead.
+//!
+//! Exchange for a verify:
+//! ```text
+//! client -> [JSON Request::Verify] [raw zstd patch]   (then finish)
+//! server -> [JSON Event] [JSON Event] ...             (then finish)
+//! ```
+//! The patch frame is always sent for `Verify`, even when empty, so the reader
+//! never has to guess whether another frame is coming.
+
+use crate::config::Platform;
+use serde::{Deserialize, Serialize};
+
+pub const ALPN: &[u8] = b"syncwork/1";
+
+/// Bumped on any breaking change to the frames below. Mismatched peers must fail
+/// loudly rather than half-work, since the two machines are upgraded separately.
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// Explain a protocol disagreement in terms the operator can act on.
+///
+/// Mismatched peers must fail loudly rather than half-work: the two machines are
+/// upgraded independently, so this will happen.
+pub fn version_mismatch(theirs: u32) -> String {
+    format!(
+        "protocol mismatch: peer speaks v{theirs}, this node speaks v{PROTOCOL_VERSION} \
+         — update `sw` on one side"
+    )
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Request {
+    /// Liveness plus a capability handshake — used by `sw status`.
+    Ping {
+        protocol: u32,
+    },
+    Verify(VerifyRequest),
+    /// Describe the peer's context roots so the client can compute a sync plan.
+    CtxManifest {
+        protocol: u32,
+        project: String,
+    },
+    /// Ask for specific files; the peer replies with `CtxFrame::File` + body pairs.
+    CtxFetch {
+        project: String,
+        root: String,
+        paths: Vec<String>,
+    },
+    /// Send files; `CtxFrame::File` + body pairs follow, terminated by `End`.
+    CtxPush {
+        project: String,
+        root: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VerifyRequest {
+    pub protocol: u32,
+    /// Guards against pointing two unrelated repos at each other.
+    pub project: String,
+    pub recipe: String,
+    /// Commit the peer must have and check out before applying the patch.
+    pub base: String,
+    /// Length of the following raw frame. Zero means the tree was clean.
+    pub patch_bytes: u64,
+    /// Purely informational, for the peer's log and TUI.
+    pub from_host: String,
+    /// Whether the requester's terminal can render escape codes. The peer runs
+    /// the build, so only the requester knows this, and forwarding coloured
+    /// output into a pipe would corrupt it.
+    #[serde(default)]
+    pub color: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum Event {
+    /// First event on every accepted request; lets the client print where the
+    /// work actually landed.
+    Accepted {
+        host: String,
+        platform: Platform,
+        repo: String,
+    },
+    Stage {
+        name: String,
+    },
+    Log {
+        err: bool,
+        line: String,
+    },
+    Diag(Diagnostic),
+    /// Terminal on success path. `code` is the recipe's exit status and is what
+    /// the client process exits with, so a caller (or an AI) can branch on it.
+    Done {
+        code: i32,
+        ms: u64,
+    },
+    /// Terminal, and the one failure a client can recover from on its own: the
+    /// peer cannot obtain the base commit, so the client re-snapshots against an
+    /// older commit that the peer does have.
+    MissingBase {
+        base: String,
+    },
+    /// Terminal on our own failure — patch would not apply, recipe unknown, etc.
+    /// Distinct from `Done { code: nonzero }`, which means the build itself failed.
+    Failed {
+        message: String,
+    },
+}
+
+/// A single compiler diagnostic, lifted out of cargo's JSON output so a remote
+/// failure arrives as `file:line: message` rather than buried in a log blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Diagnostic {
+    pub level: String,
+    pub message: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub col: Option<u32>,
+    /// cargo's own pretty-printed form, kept so we can echo exactly what a local
+    /// build would have shown.
+    pub rendered: Option<String>,
+}
+
+// ---------------------------------------------------------------- context sync
+
+/// One file in a context root.
+///
+///
+/// `mtime_ms` decides which side wins; `hash` decides whether there is anything
+/// to do at all. Both are needed: mtime alone produces pointless transfers after
+/// a sync rewrites a file, and hash alone gives no way to order two versions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CtxEntry {
+    /// Forward-slash relative path, so the two platforms agree on identity.
+    pub path: String,
+    pub size: u64,
+    pub mtime_ms: u64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CtxRoot {
+    /// Logical key, e.g. `claude`. Each machine resolves it to its own local
+    /// directory, so no path translation crosses the wire.
+    pub key: String,
+    /// False when the directory does not exist on that machine yet.
+    pub present: bool,
+    pub entries: Vec<CtxEntry>,
+}
+
+/// Frames exchanged during a context sync. A `File` is always followed by one
+/// raw frame carrying its bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum CtxFrame {
+    Roots { host: String, roots: Vec<CtxRoot> },
+    File { path: String, mtime_ms: u64 },
+    End,
+    Failed { message: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_round_trip_through_json() {
+        let cases = vec![
+            Event::Accepted {
+                host: "mac-mini".into(),
+                platform: Platform::Macos,
+                repo: "/Users/x/p".into(),
+            },
+            Event::Log {
+                err: true,
+                line: "boom".into(),
+            },
+            Event::Done {
+                code: 101,
+                ms: 4200,
+            },
+            Event::Failed {
+                message: "patch did not apply".into(),
+            },
+            Event::Diag(Diagnostic {
+                level: "error".into(),
+                message: "mismatched types".into(),
+                file: Some("src/main.rs".into()),
+                line: Some(12),
+                col: Some(5),
+                rendered: None,
+            }),
+        ];
+        for ev in cases {
+            let raw = serde_json::to_vec(&ev).unwrap();
+            let back: Event = serde_json::from_slice(&raw).unwrap();
+            assert_eq!(format!("{ev:?}"), format!("{back:?}"));
+        }
+    }
+}

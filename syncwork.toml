@@ -1,0 +1,18 @@
+[project]
+name = "syncwork"
+# Self-hosted GitLab. Only used to make a base commit reachable when the peer
+# has never seen it; ordinary verification does not touch the remote.
+remote = "origin"
+
+[recipes.ci]
+steps = [
+    "cargo build --release --all-targets",
+    "cargo test --all",
+]
+
+[recipes.check]
+steps = ["cargo clippy --all-targets -- -D warnings"]
+
+# Machine-level state — which machines are paired, and where each project lives
+# locally — is deliberately NOT here. It belongs to the machine, not the repo, and
+# lives in ~/.config/syncwork/config.toml.
