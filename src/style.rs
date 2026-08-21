@@ -79,6 +79,22 @@ impl<T: Display + ?Sized> Paint for T {}
 mod tests {
     use super::*;
 
+    /// The log filter is built from the crate name, and a tracing target defaults
+    /// to `module_path!()` — whose root is the *binary* target name, not the
+    /// package name. Spelling the package name into the filter silently dropped
+    /// every event the node emitted, which is invisible until someone goes
+    /// looking for a log that is not there.
+    #[test]
+    fn the_crate_name_used_by_the_log_filter_matches_the_module_path() {
+        assert_eq!(env!("CARGO_CRATE_NAME"), "sw");
+        assert!(
+            module_path!().starts_with(env!("CARGO_CRATE_NAME")),
+            "module path {} does not start with {}",
+            module_path!(),
+            env!("CARGO_CRATE_NAME")
+        );
+    }
+
     /// Styling is process-global, so these assertions have to run in one test to
     /// avoid racing each other under the parallel test harness.
     #[test]

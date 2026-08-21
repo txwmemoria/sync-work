@@ -56,8 +56,13 @@ async fn main() {
             //
             // where the actionable message is the second line. `SW_LOG=debug`
             // brings everything back when diagnosing connectivity.
+            //
+            // The crate name comes from the environment rather than being spelled
+            // out: a tracing target defaults to `module_path!()`, whose root is
+            // the *binary* name (`sw`), not the package name (`syncwork`).
+            // Hard-coding the package name silently dropped every info event.
             tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
-                .unwrap_or_else(|_| "error,syncwork=info".into()),
+                .unwrap_or_else(|_| format!("error,{}=info", env!("CARGO_CRATE_NAME")).into()),
         )
         .with_writer(std::io::stderr)
         .init();

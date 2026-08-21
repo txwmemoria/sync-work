@@ -148,6 +148,15 @@ done
 echo "PASS both projects verified"
 
 # ------------------------------------- uncommitted error fails with diagnostic
+step "the node records each request it served"
+# The node streams stages and build output to the *requester*, so its own log is
+# the only place the operator can see that a request arrived at all. Nothing else
+# in this suite covers it: the banner is eprintln, the request lines are tracing,
+# and only the banner was ever asserted on.
+grep -q "verify widget/ci" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the request"; }
+grep -q -- "-> exit 0" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the outcome"; }
+echo "PASS node log shows request and outcome"
+
 step "UNCOMMITTED compile error should fail with a located diagnostic"
 cat > "A/widget/src/lib.rs" <<'EOF'
 pub fn add(a: i32, b: i32) -> i32 { a + b }
