@@ -18,7 +18,7 @@
 use crate::config::{Identity, Machine, Platform};
 use crate::style::Paint;
 use crate::transport::{self, CtxFrame, Event, PROTOCOL_VERSION, Request, version_mismatch};
-use crate::{ctx, git, verify};
+use crate::{ctx, git, handoff, verify};
 use anyhow::{Result, bail};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::path::Path;
@@ -223,6 +223,23 @@ async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Resul
             Ok(())
         }
 
+        Request::Handoff {
+            protocol,
+            project,
+            branch,
+        } => {
+            let result = if protocol != PROTOCOL_VERSION {
+                transport::HandoffResult::Failed {
+                    message: version_mismatch(protocol),
+                }
+            } else {
+                handoff::server::handle(&project, &branch).await
+            };
+            transport::write_json(&mut tx, &result).await?;
+            tx.finish().ok();
+            Ok(())
+        }
+
         Request::CtxPush { project, root } => {
             match Machine::resolve_project(&project) {
                 Err(message) => {
@@ -246,6 +263,9 @@ fn describe(req: &Request) -> String {
             format!("ctx fetch {project} ({} files)", paths.len())
         }
         Request::CtxPush { project, .. } => format!("ctx push {project}"),
+        Request::Handoff {
+            project, branch, ..
+        } => format!("handoff {project} {branch}"),
     }
 }
 

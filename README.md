@@ -232,6 +232,32 @@ sw verify --push       # 顺手把分支推到 GitLab（通常不需要）
 sw status              # 对端是否在线、它服务哪些项目
 ```
 
+## 分支交接
+
+commit 完想换到另一台机器继续，原本是「这边 push、那边 pull」两步。一条命令：
+
+```bash
+sw handoff              # push 当前分支 → 让对端 fetch → 能快进就快进
+sw handoff --no-push    # 已经推过了，只让对端 fetch
+```
+
+配合 verify 就是完整的交接：
+
+```bash
+sw verify && sw handoff
+```
+
+**为什么不做成全自动**（比如 commit 时自动 push）：那一步不是传输，是「我决定发布」的决策点。WIP 想在对端验证，`sw verify` 已经覆盖了，不需要 push。真正需要 push 的时候是你判断这些 commit 该进远端 —— 而推出去的历史再改很痛。
+
+**对端绝不猜。** 它总是 fetch，但只在四个条件全满足时才动检出：请求的分支正是它检出的那个、工作区干净、远端 ref 存在、且是严格快进。任何其他情况都只 fetch 并说明原因：
+
+```
+  ok niugms-macbook-pro-local fetched master at 938ce0e
+  note the working tree here has uncommitted changes
+```
+
+这不是错误 —— commit 已经到了对端，下次 pull 是瞬间的。对端拒绝移动一个它无法安全移动的检出，正是预期行为；**说清为什么**才是价值所在。永不 force，永不产生 merge commit，永不碰脏树。
+
 `verify` 和 `ctx` 会自动把当前仓库登记到本机注册表，所以发起方那侧不必先手动 `sw link`。对端仍然需要 —— 如果没做，你会看到：
 
 ```

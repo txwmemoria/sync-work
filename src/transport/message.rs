@@ -19,7 +19,7 @@ pub const ALPN: &[u8] = b"syncwork/1";
 
 /// Bumped on any breaking change to the frames below. Mismatched peers must fail
 /// loudly rather than half-work, since the two machines are upgraded separately.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Explain a protocol disagreement in terms the operator can act on.
 ///
@@ -55,6 +55,40 @@ pub enum Request {
     CtxPush {
         project: String,
         root: String,
+    },
+    /// Ask the peer to fetch and, if it can do so safely, fast-forward a branch.
+    Handoff {
+        protocol: u32,
+        project: String,
+        branch: String,
+    },
+}
+
+/// What the peer did with a handoff.
+///
+/// Deliberately not a single ok/error. The interesting cases are the ones where
+/// the peer *declines* to move its checkout, and each calls for a different action
+/// from whoever reads it — so they are distinct variants rather than one string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "t", rename_all = "snake_case")]
+pub enum HandoffResult {
+    /// The branch was checked out, clean, and behind; it now matches.
+    FastForwarded {
+        host: String,
+        branch: String,
+        from: String,
+        to: String,
+    },
+    /// The commits reached the peer, but its checkout was left alone — a
+    /// different branch, a dirty tree, or history that would not fast-forward.
+    Fetched {
+        host: String,
+        branch: String,
+        at: String,
+        why: String,
+    },
+    Failed {
+        message: String,
     },
 }
 

@@ -9,7 +9,7 @@ pub mod project;
 
 use crate::cli::{Cli, Command, HookCmd, ServiceCmd, discover};
 use crate::config::Config;
-use crate::{ctx, node, service, verify};
+use crate::{ctx, handoff, node, service, verify};
 use anyhow::Result;
 
 pub async fn dispatch(cli: Cli) -> Result<i32> {
@@ -99,6 +99,10 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                 },
             )
             .await
+        }
+        Command::Handoff { peer, no_push } => {
+            let repo = discover(&cli.repo).await?;
+            handoff::run(&repo, handoff::Options { peer, no_push }).await
         }
         Command::Ctx {
             peer,

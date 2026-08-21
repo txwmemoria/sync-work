@@ -78,6 +78,14 @@ pub enum Command {
         #[arg(long)]
         if_reachable: bool,
     },
+    /// Push the current branch, then have the peer fetch and fast-forward it.
+    Handoff {
+        #[arg(long)]
+        peer: Option<String>,
+        /// Skip the push, for when the commits are already on the remote.
+        #[arg(long)]
+        no_push: bool,
+    },
     /// Check that the peer is reachable and speaking the same protocol.
     Status {
         #[arg(long)]

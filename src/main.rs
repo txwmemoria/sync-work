@@ -30,6 +30,7 @@ mod commands;
 mod config;
 mod ctx;
 mod git;
+mod handoff;
 mod node;
 mod service;
 mod style;

@@ -207,6 +207,45 @@ for f in "$LAB"/*.err; do
 done
 echo "PASS clean stderr"
 
+# ================================================================ sw handoff
+step "handoff: fast-forwards a clean checkout on the peer"
+# A new commit on A that B has never seen.
+printf 'pub fn added() -> i32 { 7 }\n' >> "A/widget/src/lib.rs"
+(cd "A/widget" && git add -A && git commit --quiet -m "add a function")
+BEFORE="$(cd "B/widget" && git rev-parse --short HEAD)"
+a "A/widget" handoff > "$LAB/h1.out" 2> "$LAB/h1.err" || { cat "$LAB/h1.err"; fail "handoff"; }
+AFTER="$(cd "B/widget" && git rev-parse --short HEAD)"
+[ "$BEFORE" != "$AFTER" ] || { cat "$LAB/h1.err"; fail "B did not advance"; }
+grep -q "added()" "B/widget/src/lib.rs" || fail "the commit did not reach B's checkout"
+echo "PASS $BEFORE -> $AFTER"
+
+step "handoff: refuses to touch a dirty checkout, but still fetches"
+printf 'pub fn more() -> i32 { 8 }\n' >> "A/widget/src/lib.rs"
+(cd "A/widget" && git add -A && git commit --quiet -m "another")
+# B has an uncommitted edit: its tree must not be disturbed.
+printf 'scratch\n' > "B/widget/LOCAL_SCRATCH.txt"
+(cd "B/widget" && git add LOCAL_SCRATCH.txt)
+PINNED="$(cd "B/widget" && git rev-parse --short HEAD)"
+a "A/widget" handoff > "$LAB/h2.out" 2> "$LAB/h2.err" || { cat "$LAB/h2.err"; fail "handoff should still succeed"; }
+grep -q "uncommitted changes" "$LAB/h2.err" \
+  || { cat "$LAB/h2.err"; fail "did not report why it declined"; }
+[ "$(cd "B/widget" && git rev-parse --short HEAD)" = "$PINNED" ] \
+  || fail "B's HEAD moved despite a dirty tree"
+[ -f "B/widget/LOCAL_SCRATCH.txt" ] || fail "B's uncommitted file was destroyed"
+# The commits must still have arrived, so a later pull is instant.
+(cd "B/widget" && git cat-file -e "origin/master^{commit}" 2>/dev/null) \
+  || (cd "B/widget" && git cat-file -e "origin/main^{commit}") \
+  || fail "nothing was fetched"
+echo "PASS declined safely, tree intact, commits fetched"
+
+step "handoff: reports when a different branch is checked out there"
+(cd "B/widget" && git reset --quiet HEAD LOCAL_SCRATCH.txt && rm -f LOCAL_SCRATCH.txt)
+(cd "B/widget" && git switch --quiet -c sidetrack)
+a "A/widget" handoff > "$LAB/h3.out" 2> "$LAB/h3.err" || { cat "$LAB/h3.err"; fail "handoff"; }
+grep -q "is checked out here" "$LAB/h3.err" \
+  || { cat "$LAB/h3.err"; fail "did not name the branch mismatch"; }
+echo "PASS branch mismatch reported"
+
 # ================================================================ sw ctx
 claude_dir() {  # $1 = machine letter, $2 = project
   local top; top="$(cd "$LAB/$1/$2" && git rev-parse --show-toplevel)"

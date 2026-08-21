@@ -103,6 +103,57 @@ pub async fn resolve_ref(root: &Path, rev: &str) -> Result<String> {
     .with_context(|| format!("`{rev}` does not name a commit in this repo"))
 }
 
+/// Whether the working tree or index has any change.
+///
+/// A handoff must never touch a dirty checkout, so this gates the fast-forward on
+/// the receiving side.
+pub async fn is_dirty(root: &Path) -> Result<bool> {
+    Ok(!git(root, &["status", "--porcelain"]).await?.is_empty())
+}
+
+pub async fn fetch(root: &Path, remote: &str) -> Result<()> {
+    let out = run(root, &["fetch", "--quiet", remote]).await?;
+    if !out.status.success() {
+        bail!(
+            "git fetch {remote} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Whether `a` is an ancestor of `b` — i.e. whether `b` can fast-forward from it.
+pub async fn is_ancestor(root: &Path, a: &str, b: &str) -> bool {
+    git_probe(root, &["merge-base", "--is-ancestor", a, b]).await
+}
+
+/// Fast-forward the current branch to `target`, refusing anything else.
+///
+/// `--ff-only` is the whole safety property: a handoff may advance a branch but
+/// must never create a merge commit or rewrite history on the far machine.
+pub async fn merge_ff(root: &Path, target: &str) -> Result<()> {
+    let out = run(root, &["merge", "--ff-only", target]).await?;
+    if !out.status.success() {
+        bail!(
+            "git merge --ff-only {target} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Short sha for a revision, or `unknown` when it does not resolve.
+pub async fn short_rev(root: &Path, rev: &str) -> String {
+    git(root, &["rev-parse", "--short", rev])
+        .await
+        .unwrap_or_else(|_| "unknown".into())
+}
+
+/// Whether a ref exists.
+pub async fn has_ref(root: &Path, r: &str) -> bool {
+    git_probe(root, &["rev-parse", "--verify", "--quiet", r]).await
+}
+
 /// Push the current branch, setting upstream on first push.
 pub async fn push_current(root: &Path, remote: &str) -> Result<()> {
     let branch = current_branch(root).await?;
