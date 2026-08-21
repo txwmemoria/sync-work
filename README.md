@@ -238,7 +238,7 @@ quiet_secs = 5
 | 变量 | 作用 |
 |---|---|
 | `SW_HOME` | 覆盖机器状态目录（身份 + 配置）。同一台机器上跑多个独立节点时用（端到端测试即靠它）。 |
-| `SW_LOG` | `tracing` 过滤器，如 `SW_LOG=debug`。默认 `warn`。 |
+| `SW_LOG` | `tracing` 过滤器。默认 `error,syncwork=info` —— 节点的每请求日志加上任何来源的错误，但**不含依赖库的警告**（那些描述传输层内部状态，用户无从下手，还会插进正常输出中间）。排查连通性用 `SW_LOG=debug`。 |
 | `SW_REMOTE` | 由 `sw` 注入到配方步骤中，值为 `1`。配方可用它区分远端执行。 |
 | `NO_COLOR` | 关闭着色。非终端输出本来就不着色。 |
 | `CLAUDE_CONFIG_DIR` | 覆盖 `~/.claude` 的位置，`sw ctx` 会遵循。 |

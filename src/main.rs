@@ -46,10 +46,18 @@ async fn main() {
 
     tracing_subscriber::fmt()
         .with_env_filter(
-            // The resident node logs one line per request at info; everything
-            // else stays quiet unless SW_LOG asks for more.
+            // Our own info lines (the node's per-request log) plus errors from
+            // anywhere. Dependency *warnings* are deliberately excluded: they
+            // describe transport internals the operator cannot act on, and they
+            // interleave with our output mid-line, e.g.
+            //
+            //   peer mac-mini ... WARN noq_proto: failed closing path err=...
+            //   error: could not reach peer; is `sw node` running there?
+            //
+            // where the actionable message is the second line. `SW_LOG=debug`
+            // brings everything back when diagnosing connectivity.
             tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
-                .unwrap_or_else(|_| "warn,syncwork=info".into()),
+                .unwrap_or_else(|_| "error,syncwork=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
