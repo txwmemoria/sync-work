@@ -104,10 +104,24 @@ Windows 会当场报错，你不会搞错。POSIX 允许替换正在运行的可
 
 所以顺序固定为：**先停节点 → install → 重启节点**。
 
-装了服务的话，一条命令搞定（`restart` 会先停掉旧进程）：
+### 一键脚本
+
+装了服务之后，更新用脚本就够了 —— 拉取、编译安装、重启节点、跟踪日志，顺序已经排好：
 
 ```bash
-git pull && cargo install --path . --locked && sw service restart
+scripts/update.sh
+```
+
+```powershell
+.\scripts\update.ps1
+```
+
+脚本从**自身路径**定位仓库，所以在任何目录执行都可以。它**先停节点再编译** —— 这个顺序在 Windows 上是强制的（`cargo install` 要替换的正是节点在跑的那个 exe，运行中无法替换），在 macOS 上则是为了避免"装成功了但行为没变"。最后一步跟踪日志，Ctrl-C 只停止观看，节点继续运行。
+
+手动等价于：
+
+```bash
+sw service stop && git pull --ff-only && cargo install --path . --locked && sw service start
 ```
 
 前台手动跑节点的话，先在那个终端 Ctrl-C，再 install，再重新 `sw node`。
@@ -144,6 +158,7 @@ sw service install           # 注册开机自启
 sw service install --print   # 先看它会做什么，不实际执行
 sw service status            # 是否已注册
 sw service restart           # 更新二进制后用它生效
+sw service stop / start      # 分开的两半 —— 更新脚本用 stop 先于编译
 sw service logs -f           # 跟踪节点日志（平台差异由它处理）
 sw service uninstall
 ```

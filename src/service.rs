@@ -406,23 +406,41 @@ fn spawn_all(cmds: &[Vec<String>]) -> Result<()> {
     Ok(())
 }
 
-/// Commands that stop and start the installed service again.
+/// Commands that stop the node.
 ///
-/// Needed because `install` is not a restart: on Windows `schtasks /Create /F`
-/// rewrites the task definition without touching the process already running
-/// from the previous one, so an updated binary would not take effect until the
-/// next logon.
-fn restart_plan(plan: &Plan) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+/// On launchd this is `bootout` rather than a signal: with `KeepAlive` set, a
+/// killed node is immediately restarted, so stopping means leaving the domain.
+fn stop_commands(plan: &Plan) -> Vec<Vec<String>> {
     let label = &plan.label;
     match Platform::current() {
-        // `kickstart -k` kills the running instance and starts it again in one
-        // step, which is what launchd offers instead of a restart verb.
+        Platform::Macos => vec![vec![
+            "launchctl".into(),
+            "bootout".into(),
+            format!("gui/{}/{label}", unsafe_uid()),
+        ]],
+        Platform::Linux => vec![vec![
+            "systemctl".into(),
+            "--user".into(),
+            "stop".into(),
+            format!("{label}.service"),
+        ]],
+        Platform::Windows => vec![windows_stop_command()],
+    }
+}
+
+/// Commands that start it again, as (run-to-completion, spawn-detached).
+fn start_commands(plan: &Plan) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
+    let label = &plan.label;
+    match Platform::current() {
         Platform::Macos => (
             vec![vec![
                 "launchctl".into(),
-                "kickstart".into(),
-                "-k".into(),
-                format!("gui/{}/{label}", unsafe_uid()),
+                "bootstrap".into(),
+                format!("gui/{}", unsafe_uid()),
+                plan.file
+                    .as_ref()
+                    .map(|f| f.display().to_string())
+                    .unwrap_or_default(),
             ]],
             Vec::new(),
         ),
@@ -430,29 +448,57 @@ fn restart_plan(plan: &Plan) -> (Vec<Vec<String>>, Vec<Vec<String>>) {
             vec![vec![
                 "systemctl".into(),
                 "--user".into(),
-                "restart".into(),
+                "start".into(),
                 format!("{label}.service"),
             ]],
             Vec::new(),
         ),
-        // No supervisor here: stop it, then start it ourselves.
-        Platform::Windows => (vec![windows_stop_command()], plan.detached.clone()),
+        // No supervisor here, so starting it means spawning it ourselves.
+        Platform::Windows => (Vec::new(), plan.detached.clone()),
     }
+}
+
+/// Stop the node, tolerating it not running.
+///
+/// Separate from `restart` because an update has to stop it *before* rebuilding:
+/// `cargo install` replaces the very binary the node is executing, and on Windows
+/// a running executable cannot be replaced at all.
+pub fn stop() -> Result<()> {
+    let plan = build_plan()?;
+    // Tolerated: stopping something already stopped is success, not failure.
+    run_all(&stop_commands(&plan), true)?;
+    println!("stopped {}", plan.label);
+    Ok(())
+}
+
+/// Start the node.
+pub fn start() -> Result<()> {
+    let plan = build_plan()?;
+    let (run, detached) = start_commands(&plan);
+    run_all(&run, false).with_context(|| {
+        format!(
+            "could not start {}; is it installed? try `sw service status`",
+            plan.label
+        )
+    })?;
+    spawn_all(&detached)?;
+    println!("started {}", plan.label);
+    println!("node logs to {}", plan.log.describe());
+    Ok(())
 }
 
 /// Stop and start the service, so an updated binary takes effect.
 pub fn restart() -> Result<()> {
     let plan = build_plan()?;
-    let (stop, start) = restart_plan(&plan);
-    // The stop half is tolerated: restarting something already stopped should
-    // just start it.
-    run_all(&stop, true).with_context(|| {
+    run_all(&stop_commands(&plan), true)?;
+    let (run, detached) = start_commands(&plan);
+    run_all(&run, false).with_context(|| {
         format!(
             "could not restart {}; is it installed? try `sw service status`",
             plan.label
         )
     })?;
-    spawn_all(&start)?;
+    spawn_all(&detached)?;
     println!("restarted {}", plan.label);
     println!("node logs to {}", plan.log.describe());
     Ok(())
@@ -527,10 +573,10 @@ pub fn install() -> Result<()> {
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
-    let plan = build_plan()?;
+/// The command that removes the autostart registration.
+fn uninstall_command(plan: &Plan) -> Vec<String> {
     let label = &plan.label;
-    let cmd: Vec<String> = match Platform::current() {
+    match Platform::current() {
         Platform::Macos => {
             vec![
                 "launchctl".into(),
@@ -540,11 +586,12 @@ pub fn uninstall() -> Result<()> {
         }
         Platform::Windows => {
             vec![
-                "schtasks".into(),
-                "/Delete".into(),
-                "/TN".into(),
+                "reg".into(),
+                "delete".into(),
+                WIN_RUN_KEY.into(),
+                "/v".into(),
                 label.clone(),
-                "/F".into(),
+                "/f".into(),
             ]
         }
         Platform::Linux => vec![
@@ -554,13 +601,22 @@ pub fn uninstall() -> Result<()> {
             "--now".into(),
             format!("{label}.service"),
         ],
-    };
+    }
+}
+
+pub fn uninstall() -> Result<()> {
+    let plan = build_plan()?;
+    let label = &plan.label;
+    let cmd = uninstall_command(&plan);
     let out = Command::new(&cmd[0]).args(&cmd[1..]).output();
     match out {
         Ok(o) if o.status.success() => {}
         Ok(o) => eprintln!("note: {}", String::from_utf8_lossy(&o.stderr).trim()),
         Err(e) => bail!("could not run `{}`: {e}", cmd[0]),
     }
+    // Removing the autostart entry does not stop what it already started, and on
+    // Windows nothing else will.
+    let _ = run_all(&stop_commands(&plan), true);
     if let Some(f) = &plan.file {
         let _ = std::fs::remove_file(f);
     }
@@ -568,10 +624,10 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
-pub fn status() -> Result<()> {
-    let plan = build_plan()?;
+/// The command that reports whether the registration exists.
+fn status_command(plan: &Plan) -> Vec<String> {
     let label = &plan.label;
-    let cmd: Vec<String> = match Platform::current() {
+    match Platform::current() {
         Platform::Macos => {
             vec![
                 "launchctl".into(),
@@ -581,9 +637,10 @@ pub fn status() -> Result<()> {
         }
         Platform::Windows => {
             vec![
-                "schtasks".into(),
-                "/Query".into(),
-                "/TN".into(),
+                "reg".into(),
+                "query".into(),
+                WIN_RUN_KEY.into(),
+                "/v".into(),
                 label.clone(),
             ]
         }
@@ -593,7 +650,13 @@ pub fn status() -> Result<()> {
             "status".into(),
             format!("{label}.service"),
         ],
-    };
+    }
+}
+
+pub fn status() -> Result<()> {
+    let plan = build_plan()?;
+    let label = &plan.label;
+    let cmd = status_command(&plan);
     let out = Command::new(&cmd[0])
         .args(&cmd[1..])
         .output()
@@ -715,35 +778,76 @@ mod tests {
     }
 
     #[test]
-    fn restart_stops_before_starting_on_every_platform() {
-        // A synthetic plan: only the label and the detached half matter here.
+    fn stopping_and_starting_are_symmetric_on_every_platform() {
+        // A synthetic plan: only the label, the plist path and the detached half
+        // matter here.
         let plan = Plan {
             label: label(),
-            file: None,
+            file: Some(PathBuf::from("/tmp/agent.plist")),
             contents: None,
             commands: Vec::new(),
             detached: vec![vec!["launcher".into()]],
             log: LogSource::File(PathBuf::from("/tmp/x.log")),
         };
-        let (stop, start) = restart_plan(&plan);
-        let stop_flat: Vec<String> = stop.iter().map(|c| c.join(" ")).collect();
+        let stop = stop_commands(&plan)
+            .iter()
+            .map(|c| c.join(" "))
+            .collect::<Vec<_>>();
+        let (run, detached) = start_commands(&plan);
+        let run_flat = run.iter().map(|c| c.join(" ")).collect::<Vec<_>>();
+
         match Platform::current() {
-            // launchd has no restart verb; -k is what makes kickstart replace a
-            // running instance rather than no-op.
             Platform::Macos => {
-                assert!(stop_flat[0].contains("kickstart -k"), "got {stop_flat:?}");
-                assert!(start.is_empty(), "launchd restarts it itself");
+                // With KeepAlive set, a signal would just be undone by launchd,
+                // so stopping has to mean leaving the domain.
+                assert!(stop[0].contains("bootout"), "got {stop:?}");
+                assert!(run_flat[0].contains("bootstrap"), "got {run_flat:?}");
+                assert!(run_flat[0].contains("/tmp/agent.plist"));
+                assert!(detached.is_empty());
             }
             Platform::Linux => {
-                assert!(stop_flat[0].contains("restart"), "got {stop_flat:?}");
-                assert!(start.is_empty(), "systemd restarts it itself");
+                assert!(stop[0].contains("stop"), "got {stop:?}");
+                assert!(run_flat[0].contains("start"), "got {run_flat:?}");
+                assert!(detached.is_empty());
             }
-            // With no supervisor, a restart is only a restart if we start it
-            // again ourselves.
+            // With no supervisor, starting means spawning it ourselves.
             Platform::Windows => {
-                assert!(stop_flat[0].contains("Stop-Process"), "got {stop_flat:?}");
-                assert_eq!(start, plan.detached, "must relaunch after stopping");
+                assert!(stop[0].contains("Stop-Process"), "got {stop:?}");
+                assert!(run_flat.is_empty(), "nothing to run to completion");
+                assert_eq!(detached, plan.detached, "must relaunch the node itself");
             }
+        }
+    }
+
+    /// install / status / uninstall are three separate matches on the platform,
+    /// which is exactly how `status` came to report "not installed" while a node
+    /// started by `install` was running: the mechanism was changed in one place
+    /// and not the other two.
+    #[test]
+    fn every_windows_service_command_agrees_on_the_mechanism() {
+        if Platform::current() != Platform::Windows {
+            return;
+        }
+        let plan = build_plan().unwrap();
+        let mut all: Vec<String> = plan.commands.iter().map(|c| c.join(" ")).collect();
+        all.extend(stop_commands(&plan).iter().map(|c| c.join(" ")));
+        let (run, _) = start_commands(&plan);
+        all.extend(run.iter().map(|c| c.join(" ")));
+        all.push(uninstall_command(&plan).join(" "));
+        all.push(status_command(&plan).join(" "));
+
+        for cmd in &all {
+            assert!(
+                !cmd.contains("schtasks"),
+                "still reaching for a Scheduled Task, which is refused without                  elevation: {cmd}"
+            );
+        }
+        // The three registry-touching commands must name the same key and value.
+        let reg: Vec<&String> = all.iter().filter(|c| c.starts_with("reg ")).collect();
+        assert_eq!(reg.len(), 3, "expected add/query/delete, got {reg:?}");
+        for cmd in reg {
+            assert!(cmd.contains(WIN_RUN_KEY), "wrong key: {cmd}");
+            assert!(cmd.contains(&plan.label), "wrong value name: {cmd}");
         }
     }
 

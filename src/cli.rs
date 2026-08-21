@@ -115,6 +115,11 @@ pub enum ServiceCmd {
     },
     /// Stop and start the service, so an updated binary takes effect.
     Restart,
+    /// Stop the node. Needed before an update: `cargo install` replaces the
+    /// binary the node is running from.
+    Stop,
+    /// Start the node.
+    Start,
     /// Remove the registration.
     Uninstall,
     /// Report whether the node is registered.

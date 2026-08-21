@@ -155,6 +155,10 @@ step "the node records each request it served"
 # and only the banner was ever asserted on.
 grep -q "verify widget/ci" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the request"; }
 grep -q -- "-> exit 0" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the outcome"; }
+# The path must be reported after the work, not at connect time: a connection is
+# always relayed at the moment it opens, so sampling it there would claim every
+# transfer went through the relay.
+grep -q "served via" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log does not report the path it served over"; }
 echo "PASS node log shows request and outcome"
 
 step "UNCOMMITTED compile error should fail with a located diagnostic"

@@ -118,7 +118,11 @@ async fn handle_connection(conn: Connection) -> Result<()> {
             return Ok(());
         }
     };
-    tracing::info!("{peer_name} connected via {paths}");
+    // Debug, not info: the path sampled here is always the relay. A connection
+    // starts relayed and only gains a direct path once holepunching completes,
+    // so reporting it at connect time would claim every transfer went through
+    // the relay when most of the bytes did not.
+    tracing::debug!("{peer_name} connected, initial path {paths}");
 
     // A connection may carry several requests; loop until the peer hangs up.
     loop {
@@ -130,6 +134,13 @@ async fn handle_connection(conn: Connection) -> Result<()> {
         if let Err(e) = route(tx, rx, &peer_name).await {
             tracing::error!("{peer_name}: request failed: {e:#}");
         }
+        // Sampled after the work, which is when the answer is meaningful: by now
+        // holepunching has had time to succeed, so this says whether the request
+        // actually travelled peer-to-peer.
+        tracing::info!(
+            "{peer_name}: served via {}",
+            transport::describe_paths(&conn)
+        );
     }
 }
 
