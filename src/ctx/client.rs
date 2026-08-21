@@ -67,10 +67,24 @@ async fn sync_with(
         Err(e) => return Err(e),
     };
 
+    // Wrapped once, rather than at each `?` inside: a refusal can surface from
+    // any step of the exchange, in a different shape each time.
+    exchange(&conn, cfg, peer_name, roots, opts)
+        .await
+        .map_err(|e| transport::explain(&conn, e))
+}
+
+async fn exchange(
+    conn: &iroh::endpoint::Connection,
+    cfg: &Config,
+    peer_name: &str,
+    roots: &[Root],
+    opts: &Options,
+) -> Result<i32> {
     // One manifest exchange covers every root, so the plan is computed from a
     // single consistent view rather than drifting between round trips.
     let project = &cfg.project.name;
-    let (remote_host, remote_roots) = fetch_manifests(&conn, project).await?;
+    let (remote_host, remote_roots) = fetch_manifests(conn, project).await?;
     eprintln!("{} {peer_name} ({remote_host})", "ctx".bold());
 
     let quiet_ms = cfg.context.quiet_secs.saturating_mul(1000);
@@ -121,10 +135,10 @@ async fn sync_with(
         }
 
         if !plan.pull.is_empty() {
-            pull(&conn, project, root, &plan.pull, &remote_host, &mut totals).await?;
+            pull(conn, project, root, &plan.pull, &remote_host, &mut totals).await?;
         }
         if !plan.push.is_empty() {
-            push(&conn, project, root, &plan.push, &mut totals).await?;
+            push(conn, project, root, &plan.push, &mut totals).await?;
         }
     }
 

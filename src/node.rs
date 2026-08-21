@@ -307,7 +307,13 @@ pub async fn ping(peer_name: Option<&str>) -> Result<()> {
 
 async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()> {
     let conn = transport::connect(ep, peer).await?;
-    let (mut tx, mut rx) = transport::open_request(&conn).await?;
+    ping_exchange(&conn)
+        .await
+        .map_err(|e| transport::explain(&conn, e))
+}
+
+async fn ping_exchange(conn: &iroh::endpoint::Connection) -> Result<()> {
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     transport::write_json(
         &mut tx,
         &Request::Ping {
@@ -339,7 +345,7 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
             // Read after the exchange, not before: a connection begins relayed and
             // only gains a direct path once holepunching succeeds, so sampling it
             // immediately after `connect` would almost always say "relay".
-            println!("  path     {}", transport::describe_paths(&conn).await);
+            println!("  path     {}", transport::describe_paths(conn).await);
             Ok(())
         }
         Some(Event::Failed { message }) => {
@@ -350,7 +356,7 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
             println!("{}", "error".red().bold());
             // A clean end of stream with nothing on it is what a refusal looks
             // like once the request is already in flight.
-            match transport::refusal(&conn) {
+            match transport::refusal(conn) {
                 Some(explained) => bail!("{explained}"),
                 None => bail!("peer closed the connection without replying"),
             }

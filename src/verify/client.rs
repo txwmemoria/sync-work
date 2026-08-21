@@ -65,9 +65,23 @@ async fn verify_against(
     opts: &Options,
 ) -> Result<i32> {
     let conn = transport::connect(ep, peer).await?;
+    // Wrapped once: a refusal can surface from any step of the exchange, in a
+    // different shape each time, so no individual `?` is the right place.
+    attempts(&conn, repo, cfg, peer_name, base, opts)
+        .await
+        .map_err(|e| transport::explain(&conn, e))
+}
 
+async fn attempts(
+    conn: &iroh::endpoint::Connection,
+    repo: &Path,
+    cfg: &Config,
+    peer_name: &str,
+    base: &str,
+    opts: &Options,
+) -> Result<i32> {
     // First attempt against HEAD keeps the patch as small as possible.
-    match attempt(repo, cfg, &conn, base, &opts.recipe, peer_name).await? {
+    match attempt(repo, cfg, conn, base, &opts.recipe, peer_name).await? {
         Outcome::Done(code) => Ok(code),
         Outcome::Failed(msg) => bail!("{msg}"),
         Outcome::MissingBase(missing) => {
@@ -87,7 +101,7 @@ async fn verify_against(
                 missing,
                 fallback
             );
-            match attempt(repo, cfg, &conn, &fallback, &opts.recipe, peer_name).await? {
+            match attempt(repo, cfg, conn, &fallback, &opts.recipe, peer_name).await? {
                 Outcome::Done(code) => Ok(code),
                 Outcome::Failed(msg) => bail!("{msg}"),
                 Outcome::MissingBase(b) => bail!(

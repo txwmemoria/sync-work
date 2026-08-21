@@ -1,26 +1,71 @@
-# sw — 对等跨平台构建验证
+# sw
 
-一个**通用工具**，管理你任意数量的 git 仓库。两台机器（Windows / macOS）各跑一个 `sw`，互相帮对方编译验证。**没有主机概念**，任意一方都能发起。
+在两台机器（Windows / macOS）上开发同一个项目时，把中间那些来回的手工操作去掉。
 
-核心特性：**不需要 commit，不需要 push**。`sw verify` 把当前工作区（含未暂存、未跟踪的改动）打成 patch，经加密 P2P 通道送到对端的独立 worktree 构建，日志流式回传，**退出码原样透传**。
+## 它解决什么
+
+**一、想知道代码在另一个平台上能不能编过、测试能不能过。**
+
+现在的流程是：提交 → 推送 → 切到另一台机器 → 拉取 → 跑一遍构建脚本 → 看结果。**每验证一次都要走这一整套**，而且往往只是想确认一个几行的改动。
+
+**二、换机器之后 AI 会话断了。**
+
+Claude Code 的对话记录和记忆存在本地（`~/.claude/` 下），另一台机器上没有。代码能靠 git 过去，这些不能。
+
+`sw` 把它们各变成一条命令：
+
+| 你想做的 | 命令 |
+|---|---|
+| 让另一台机器编译并测试我**现在**的代码（不用提交） | `sw verify` |
+| 把 AI 会话记录和记忆带到另一台机器 | `sw ctx` |
+| 提交完了，让另一台机器跟上 | `sw handoff` |
+| 哪里不对，一次查清 | `sw doctor` |
+
+两台机器地位对等 —— 没有主机和从机，任意一方都能发起。
+
+## `sw verify` 实际长什么样
+
+下面是真实输出：在 Windows 上敲命令，Mac 编译。
 
 ```
-$ cd ~/projects/myapp && sw verify
-verify mac-mini  ci  4bbd58fa2869 + 3 files (12.4 KiB → 3.1 KiB)
-  on mac-mini (macos)  /Users/me/code/myapp
+verify niugms-macbook-pro-local  ci  f3f2730e553a + 1 file (659 B → 368 B)
+  on niugms-macbook-pro-local (macos) [90e2491]  /Users/niugm/projects/sync-work
   › reusing worktree
   › applying patch
   › [1/2] cargo build --release --all-targets
 error[E0308]: mismatched types
- --> src/net.rs:88:21
-  ...
-fail mac-mini exit 1 in 4.2s (1 error, 0 warnings)
-
-$ echo $?
-1
+ --> src/style.rs:106:18
+    |
+106 |     let n: i32 = "this is not an integer";
+    |            ---   ^^^^^^^^^^^^^^^^^^^^^^^^ expected `i32`, found `&str`
+fail niugms-macbook-pro-local exit 1 in 1.6s (2 errors, 0 warnings)
 ```
 
-退出码透传是整个设计的关键：`sw verify` 能像任何本地构建命令一样组合进 `&&` 链、git hook，或者交给 AI 工具驱动「改 → 远端验 → 读错误 → 再改」的闭环，不需要人转述失败信息。
+三件事值得注意：
+
+1. **这份改动没有 commit，也没有 push。** 当前工作区 —— 包括未暂存和未跟踪的文件 —— 被打成 patch 直接送到对端。
+2. **Mac 编译器的诊断带着 `src/style.rs:106:18` 原样回到了你的终端**，不是一坨日志让你自己找。
+3. **退出码是对端的**（这里是 1）。所以它能像任何本地构建命令一样接进 `&&` 链、git hook，或者交给 AI 工具驱动「改 → 远端验 → 读错误 → 再改」的闭环 —— 不需要人把失败信息转述一遍。
+
+速度：
+
+| | 耗时 |
+|---|---|
+| 首次（对端冷缓存） | 1m39s |
+| 之后 | **1.6s** |
+
+差别来自对端保留了一个持久 worktree，`target/` 缓存不会被清掉。1.6 秒这个数字是关键 —— 它让远端验证能进内层开发循环，而不是感觉像 CI。
+
+## 快速上手
+
+```bash
+cargo install --path . --locked     # 两台机器都装
+sw pair init                        # 一台机器上，一次性
+sw pair join <ticket>               # 另一台机器上
+sw service install                  # 两台各一次，节点开机自启
+```
+
+然后在每个想跨平台验证的项目里：`sw init`（第一台）、`sw link`（另一台）。细节见下面「一次性设置」和「接入一个仓库」。
 
 ## 两层模型（先看这个）
 

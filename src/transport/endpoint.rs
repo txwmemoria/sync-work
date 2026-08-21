@@ -183,6 +183,21 @@ pub fn refusal(conn: &iroh::endpoint::Connection) -> Option<String> {
     )
 }
 
+/// Prefer the refusal explanation over whatever transport error surfaced.
+///
+/// A refusal reaches the client as at least three different shapes depending on
+/// when the peer closed: an error from `open_bi`, a clean end-of-stream, or
+/// `connection lost` from a read already in flight. Each of the first two was
+/// patched at its own call site and the third still arrived raw. No individual
+/// site can be trusted to remember this, so every client exchange funnels its
+/// error through here instead.
+pub fn explain(conn: &iroh::endpoint::Connection, e: anyhow::Error) -> anyhow::Error {
+    match refusal(conn) {
+        Some(text) => anyhow::anyhow!("{text}"),
+        None => e,
+    }
+}
+
 /// Open a request stream, translating a refusal into something actionable.
 pub async fn open_request(
     conn: &iroh::endpoint::Connection,

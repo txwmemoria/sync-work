@@ -38,19 +38,23 @@ pub async fn run(repo: &Path, opts: Options) -> Result<i32> {
     let project = cfg.project.name.clone();
     transport::with_endpoint(&identity, |ep| async move {
         let conn = transport::connect(&ep, &peer).await?;
-        let (mut tx, mut rx) = transport::open_request(&conn).await?;
-        transport::write_json(
-            &mut tx,
-            &Request::Handoff {
-                protocol: PROTOCOL_VERSION,
-                project,
-                branch: branch.clone(),
-            },
-        )
-        .await?;
-        tx.finish().ok();
+        let exchange = async {
+            let (mut tx, mut rx) = transport::open_request(&conn).await?;
+            transport::write_json(
+                &mut tx,
+                &Request::Handoff {
+                    protocol: PROTOCOL_VERSION,
+                    project,
+                    branch: branch.clone(),
+                },
+            )
+            .await?;
+            tx.finish().ok();
 
-        let result: HandoffResult = transport::read_json(&mut rx).await?;
+            let result: HandoffResult = transport::read_json(&mut rx).await?;
+            anyhow::Ok(result)
+        };
+        let result = exchange.await.map_err(|e| transport::explain(&conn, e))?;
         report(&peer_name, &result);
         match result {
             HandoffResult::Failed { message } => bail!("{message}"),
