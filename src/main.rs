@@ -42,9 +42,6 @@ use clap::Parser;
 
 #[tokio::main]
 async fn main() {
-    // Decided once, before anything is printed.
-    style::set_enabled(style::detect());
-
     tracing_subscriber::fmt()
         .with_env_filter(
             // Our own info lines (the node's per-request log) plus errors from
@@ -68,7 +65,14 @@ async fn main() {
         .with_writer(std::io::stderr)
         .init();
 
+    // Parsed before anything is printed so `--color` applies to the whole run,
+    // including the error path below.
     let cli = cli::Cli::parse();
+    style::set_enabled(match cli.color {
+        cli::ColorWhen::Always => true,
+        cli::ColorWhen::Never => false,
+        cli::ColorWhen::Auto => style::detect(),
+    });
     match commands::dispatch(cli).await {
         // A non-zero code here is the peer's build result, propagated verbatim so
         // `sw verify && ...` and agent-driven retry loops behave correctly.

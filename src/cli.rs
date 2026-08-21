@@ -28,8 +28,19 @@ pub struct Cli {
     #[arg(long, short = 'C', global = true, value_name = "DIR")]
     pub repo: Option<PathBuf>,
 
+    /// When to colourise output. `auto` decorates only a terminal.
+    #[arg(long, global = true, value_enum, default_value_t = ColorWhen::Auto)]
+    pub color: ColorWhen,
+
     #[command(subcommand)]
     pub command: Command,
+}
+
+#[derive(Copy, Clone, PartialEq, Eq, clap::ValueEnum)]
+pub enum ColorWhen {
+    Auto,
+    Always,
+    Never,
 }
 
 #[derive(Subcommand)]

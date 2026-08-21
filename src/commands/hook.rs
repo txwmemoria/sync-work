@@ -10,6 +10,7 @@
 //! `-C <repo>` rather than relying on the working directory, which a hook does
 //! not guarantee.
 
+use crate::git;
 use crate::style::Paint;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
@@ -20,6 +21,11 @@ use std::path::{Path, PathBuf};
 /// Matching on the flag rather than on the whole command line means a hook still
 /// gets recognised after the repo moves, or after someone edits the path by hand.
 const MARKER: &str = "ctx --if-reachable";
+
+/// Gitignore entry for the file this command writes. An unignored settings file
+/// would leave the tree permanently dirty, and a dirty tree is exactly what makes
+/// `sw handoff` decline to fast-forward on the other machine.
+const HOOK_IGNORE: &str = ".claude/settings.local.json";
 
 fn settings_path(repo: &Path) -> PathBuf {
     repo.join(".claude").join("settings.local.json")
@@ -81,7 +87,7 @@ fn entry_is_ours(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
-pub fn install(repo: &Path) -> Result<i32> {
+pub async fn install(repo: &Path) -> Result<i32> {
     let path = settings_path(repo);
     let mut settings = read_settings(&path)?;
 
@@ -109,6 +115,9 @@ pub fn install(repo: &Path) -> Result<i32> {
         }));
 
     write_settings(&path, &settings)?;
+    // Ignored by the *repo*, not left to a global config that differs per machine.
+    git::ensure_ignored(repo, HOOK_IGNORE).await?;
+
     println!("{} {}", "installed".green().bold(), path.display());
     println!("  {}", hook_command(repo).dimmed());
     println!();

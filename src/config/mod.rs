@@ -14,4 +14,4 @@ pub mod repo;
 
 pub use machine::{Identity, Machine, Peer};
 pub use platform::Platform;
-pub use repo::{CONFIG_FILE, Config, ResolvedRecipe, STATE_DIR};
+pub use repo::{CONFIG_FILE, Config, ResolvedRecipe, STATE_DIR, STATE_DIR_IGNORE};

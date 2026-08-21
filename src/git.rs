@@ -434,14 +434,22 @@ pub fn state_dir(repo: &Path) -> PathBuf {
     repo.join(crate::config::STATE_DIR)
 }
 
-/// Ensure `.sw/` is ignored. The worktree and scratch index live there, and
-/// committing either would be actively harmful.
-pub async fn ensure_ignored(repo: &Path) -> Result<()> {
+/// Add `pattern` to the repo's `.gitignore` if it is not already there.
+///
+/// The repo's own file, deliberately — not a global config, which differs from
+/// machine to machine. A file `sw` writes into the working tree and does not
+/// ignore leaves the tree permanently dirty, which makes `sw verify` ship a
+/// pointless patch every time and makes `sw handoff` refuse to fast-forward on
+/// the far side.
+pub async fn ensure_ignored(repo: &Path, pattern: &str) -> Result<()> {
     let path = repo.join(".gitignore");
     let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    // Compared with and without the trailing slash so `.sw` and `.sw/` count as
+    // the same entry rather than accumulating duplicates.
+    let bare = pattern.trim_end_matches('/');
     if existing
         .lines()
-        .any(|l| l.trim() == ".sw/" || l.trim() == ".sw")
+        .any(|l| l.trim() == pattern || l.trim() == bare)
     {
         return Ok(());
     }
@@ -449,7 +457,8 @@ pub async fn ensure_ignored(repo: &Path) -> Result<()> {
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str(".sw/\n");
+    next.push_str(pattern);
+    next.push('\n');
     tokio::fs::write(&path, next).await?;
     Ok(())
 }

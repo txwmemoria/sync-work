@@ -23,7 +23,7 @@ pub async fn init(repo: &Path, name: Option<String>) -> Result<i32> {
         bail!("{} already exists", path.display());
     }
     Config::template(&name).save(repo)?;
-    git::ensure_ignored(repo).await?;
+    git::ensure_ignored(repo, config::STATE_DIR_IGNORE).await?;
     link(repo, &name, false)?;
 
     println!("{} {}", "created".green().bold(), path.display());

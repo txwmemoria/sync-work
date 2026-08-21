@@ -17,6 +17,8 @@ use std::path::Path;
 
 pub const CONFIG_FILE: &str = "syncwork.toml";
 pub const STATE_DIR: &str = ".sw";
+/// The gitignore form of [`STATE_DIR`].
+pub const STATE_DIR_IGNORE: &str = ".sw/";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Recipe {

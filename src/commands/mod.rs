@@ -29,7 +29,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             // Repo-scoped: the hook is per checkout, and carries its path.
             let repo = discover(&cli.repo).await?;
             match cmd {
-                HookCmd::Install => hook::install(&repo),
+                HookCmd::Install => hook::install(&repo).await,
                 HookCmd::Uninstall => hook::uninstall(&repo),
                 HookCmd::Status => hook::status(&repo),
             }
