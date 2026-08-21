@@ -120,6 +120,11 @@ pub enum Event {
         host: String,
         platform: Platform,
         repo: String,
+        /// Commit the peer's binary was built from, so a node left running on
+        /// stale code is visible rather than guessed at. Defaulted so a peer
+        /// predating this field still deserialises.
+        #[serde(default)]
+        build: String,
     },
     Stage {
         name: String,
@@ -211,6 +216,7 @@ mod tests {
                 host: "mac-mini".into(),
                 platform: Platform::Macos,
                 repo: "/Users/x/p".into(),
+                build: "abc1234".into(),
             },
             Event::Log {
                 err: true,

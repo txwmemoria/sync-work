@@ -411,6 +411,34 @@ bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，1
 
 ## 排查
 
+先跑这个：
+
+```bash
+sw doctor
+```
+
+它把这套东西可能出问题的地方一次全查：本机身份和**实际读到的**状态目录、节点在不在跑、自启是否注册、每个已 link 项目的路径与项目名是否对得上、每个对端是否可达（含直连/relay 路径）、公钥是否互认、以及**两端构建是否一致**。
+
+有失败项退出 1，只有警告退出 0 —— 「另一台机器睡着了」不是配置错误。
+
+```
+this machine
+  ✓ identity    58c1190746e246c3…
+  ✓ state       C:\Users\sdkpo\AppData\Roaming\syncwork\config
+  ✓ build       b9f24fc
+  ✗ node        not running — start it with `sw service start`
+  ✓ autostart   registered
+
+peers
+  ✓ niugms-macbook-pro-local  reachable
+      *direct 10.209.21.106:56274 5ms, relay ... 172ms
+  ✓ keys        agree (the peer accepted this machine's key)
+  ! build       peer 80998d1, here b9f24fc
+      if you just updated, the peer's node is still on old code: `sw service restart` there
+```
+
+这里每一项都对应我们真实排查过的一次故障。下面几条是它给出结论后的解释：
+
 **`the peer refused us as unpaired`** —— 对端连上了但不认识你的公钥。它记录的是一个过期的 key，通常因为本机身份被重新生成过。两边各跑 `sw pair list` 对比：你的 `id` 和对端 peers 表里记的应该一致。不一致就重新配对。
 
 **`could not reach peer ...; is 'sw node' running there?`** —— 对端节点没在跑，或者网络不通。先确认对端有 `sw node`；确认了还不通就 `SW_LOG=debug sw status` 看握手细节。

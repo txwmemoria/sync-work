@@ -19,7 +19,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "sw",
-    version,
+    version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("SW_BUILD"), ")"),
     about = "Cross-platform build verification between peer machines",
     long_about = None
 )]
@@ -49,6 +49,12 @@ pub enum Command {
     },
     /// List the projects registered on this machine.
     Projects,
+    /// Check everything: identity, node, projects, peers, and build agreement.
+    Doctor {
+        /// Only check this peer.
+        #[arg(long)]
+        peer: Option<String>,
+    },
     /// Run the resident node. One per machine; serves every linked project.
     Node,
     /// Build the current working tree on the peer and report the result here.

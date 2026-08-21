@@ -38,6 +38,7 @@ async fn accept_loop(ep: iroh::Endpoint, machine: Machine, id: String) -> Result
     ep.online().await;
 
     eprintln!("{} {}", "node".green().bold(), id.dimmed());
+    eprintln!("  build    {}", env!("SW_BUILD"));
     eprintln!("  name     {}", machine.node_name());
     eprintln!("  platform {}", Platform::current());
     if machine.peers.is_empty() {
@@ -158,6 +159,7 @@ async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Resul
                 Event::Accepted {
                     host: machine.node_name(),
                     platform: Platform::current(),
+                    build: env!("SW_BUILD").to_string(),
                     // A ping has no single repo, so report what is served instead.
                     repo: if machine.projects.is_empty() {
                         "no projects linked".into()
@@ -320,11 +322,20 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
             host,
             platform,
             repo,
+            build,
         }) => {
             println!("{}", "up".green().bold());
             println!("  name     {host}");
             println!("  platform {platform}");
             println!("  projects {repo}");
+            println!(
+                "  build    {}",
+                if build.is_empty() {
+                    "(not reported)".to_string()
+                } else {
+                    build
+                }
+            );
             // Read after the exchange, not before: a connection begins relayed and
             // only gains a direct path once holepunching succeeds, so sampling it
             // immediately after `connect` would almost always say "relay".

@@ -80,6 +80,7 @@ pub async fn handle(
             host: Machine::load().map(|m| m.node_name()).unwrap_or_default(),
             platform,
             repo: repo.display().to_string(),
+            build: env!("SW_BUILD").to_string(),
         })
         .await;
 

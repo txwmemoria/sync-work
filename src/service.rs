@@ -504,6 +504,49 @@ pub fn restart() -> Result<()> {
     Ok(())
 }
 
+/// How many resident nodes are running here.
+///
+/// `None` when the check itself could not run, which is different from zero and
+/// must not be reported as "not running".
+///
+/// Matched on the command line rather than the image name for the same reason the
+/// stop command is: `sw verify` is the same executable, and counting those would
+/// make a healthy machine look like it has stray nodes.
+pub fn running_nodes() -> Option<usize> {
+    let cmd: Vec<&str> = match Platform::current() {
+        Platform::Windows => vec![
+            "powershell",
+            "-NoProfile",
+            "-Command",
+            concat!(
+                "(Get-CimInstance Win32_Process -Filter 'Name=''sw.exe''' | ",
+                "Where-Object { $_.CommandLine -like '* node*' } | ",
+                "Measure-Object).Count"
+            ),
+        ],
+        // -c counts matches. It exits 1 with a count of 0 when nothing matches,
+        // which is a legitimate answer rather than a failed check.
+        _ => vec!["pgrep", "-c", "-f", "sw node"],
+    };
+    let out = Command::new(cmd[0]).args(&cmd[1..]).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // pgrep exits 1 with no output when nothing matched. That is a real answer of
+    // zero, not a failed check, so it must not become `None`.
+    if text.is_empty() {
+        return Some(0);
+    }
+    text.parse().ok()
+}
+
+/// Whether the autostart entry exists, without printing anything.
+pub fn is_registered() -> bool {
+    let Ok(plan) = build_plan() else {
+        return false;
+    };
+    let cmd = status_command(&plan);
+    matches!(Command::new(&cmd[0]).args(&cmd[1..]).output(), Ok(o) if o.status.success())
+}
+
 /// Show the node's log, wherever this platform keeps it.
 ///
 /// Exists so nobody has to remember three different answers: a file under

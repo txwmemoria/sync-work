@@ -3,6 +3,7 @@
 //! The two commands with a peer on the other end (`verify`, `ctx`) live with
 //! their protocol halves instead; what remains here is local bookkeeping.
 
+pub mod doctor;
 pub mod hook;
 pub mod pair;
 pub mod project;
@@ -34,6 +35,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             }
         }
         Command::Projects => project::list(),
+        Command::Doctor { peer } => doctor::run(peer.as_deref()).await,
         Command::Service(cmd) => {
             match cmd {
                 ServiceCmd::Install { print } => {

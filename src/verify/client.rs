@@ -154,8 +154,18 @@ async fn attempt(
                 host,
                 platform,
                 repo,
+                build,
             } => {
-                eprintln!("{} {host} ({platform})  {}", "  on".dimmed(), repo.dimmed());
+                let stamp = if build.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", format!("[{build}]").dimmed())
+                };
+                eprintln!(
+                    "{} {host} ({platform}){stamp}  {}",
+                    "  on".dimmed(),
+                    repo.dimmed()
+                );
             }
             Event::Stage { name } => {
                 eprintln!("{} {name}", "  ›".blue().bold());
