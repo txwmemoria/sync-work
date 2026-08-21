@@ -73,6 +73,10 @@ pub enum Command {
         /// Show what would move without writing anything.
         #[arg(long)]
         dry_run: bool,
+        /// Exit 0 when the peer is unreachable instead of failing. For hooks and
+        /// other unattended callers.
+        #[arg(long)]
+        if_reachable: bool,
     },
     /// Check that the peer is reachable and speaking the same protocol.
     Status {
@@ -85,6 +89,9 @@ pub enum Command {
     /// Keep `sw node` running across reboots.
     #[command(subcommand)]
     Service(ServiceCmd),
+    /// Run `sw ctx` automatically when a Claude Code session ends.
+    #[command(subcommand)]
+    Hook(HookCmd),
 }
 
 #[derive(Subcommand)]
@@ -103,6 +110,16 @@ pub enum PairCmd {
     },
     /// List paired machines.
     List,
+}
+
+#[derive(Subcommand)]
+pub enum HookCmd {
+    /// Add the Stop hook to .claude/settings.local.json.
+    Install,
+    /// Remove it.
+    Uninstall,
+    /// Report whether it is installed.
+    Status,
 }
 
 #[derive(Subcommand)]

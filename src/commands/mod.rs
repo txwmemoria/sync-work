@@ -3,10 +3,11 @@
 //! The two commands with a peer on the other end (`verify`, `ctx`) live with
 //! their protocol halves instead; what remains here is local bookkeeping.
 
+pub mod hook;
 pub mod pair;
 pub mod project;
 
-use crate::cli::{Cli, Command, ServiceCmd, discover};
+use crate::cli::{Cli, Command, HookCmd, ServiceCmd, discover};
 use crate::config::Config;
 use crate::{ctx, node, service, verify};
 use anyhow::Result;
@@ -23,6 +24,15 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             Ok(0)
         }
         Command::Pair(cmd) => pair::run(cmd).await,
+        Command::Hook(cmd) => {
+            // Repo-scoped: the hook is per checkout, and carries its path.
+            let repo = discover(&cli.repo).await?;
+            match cmd {
+                HookCmd::Install => hook::install(&repo),
+                HookCmd::Uninstall => hook::uninstall(&repo),
+                HookCmd::Status => hook::status(&repo),
+            }
+        }
         Command::Projects => project::list(),
         Command::Service(cmd) => {
             match cmd {
@@ -90,11 +100,23 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             )
             .await
         }
-        Command::Ctx { peer, dry_run } => {
+        Command::Ctx {
+            peer,
+            dry_run,
+            if_reachable,
+        } => {
             let repo = discover(&cli.repo).await?;
             let cfg = Config::load(&repo)?;
             project::link(&repo, &cfg.project.name, true)?;
-            ctx::sync(&repo, ctx::Options { peer, dry_run }).await
+            ctx::sync(
+                &repo,
+                ctx::Options {
+                    peer,
+                    dry_run,
+                    if_reachable,
+                },
+            )
+            .await
         }
     }
 }

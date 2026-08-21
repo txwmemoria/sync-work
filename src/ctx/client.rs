@@ -12,6 +12,13 @@ use std::path::Path;
 pub struct Options {
     pub peer: Option<String>,
     pub dry_run: bool,
+    /// Treat an unreachable peer as success.
+    ///
+    /// For unattended use — the Stop hook fires at the end of every session,
+    /// including on a laptop with the other machine asleep, and an error there
+    /// would be noise about a condition the user cannot act on. A *refused*
+    /// peer is still an error: that is a misconfiguration, not a transient.
+    pub if_reachable: bool,
 }
 
 /// Totals reported at the end of a run.
@@ -50,7 +57,15 @@ async fn sync_with(
     roots: &[Root],
     opts: &Options,
 ) -> Result<i32> {
-    let conn = transport::connect(ep, peer).await?;
+    let conn = match transport::connect(ep, peer).await {
+        Ok(c) => c,
+        Err(e) if opts.if_reachable => {
+            eprintln!("{} {peer_name} is not reachable, skipping", "ctx".dimmed());
+            tracing::debug!("skipped context sync: {e:#}");
+            return Ok(0);
+        }
+        Err(e) => return Err(e),
+    };
 
     // One manifest exchange covers every root, so the plan is computed from a
     // single consistent view rather than drifting between round trips.

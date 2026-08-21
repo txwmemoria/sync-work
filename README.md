@@ -249,6 +249,22 @@ sw ctx --dry-run    # 只看会动什么
 
 同步完在另一台机器上 `/resume` 就能看到这台的会话，memory 也一并共享。每个项目的上下文独立，互不串台。
 
+### 让它自动跑
+
+不想每次都记得，就挂上 Claude Code 的 Stop hook —— 会话结束时自动同步：
+
+```bash
+sw hook install     # 两台机器各自的检出里都要跑一次
+sw hook status
+sw hook uninstall
+```
+
+时机正好：会话结束意味着 transcript 停止增长，`quiet_secs` 的跳过规则不会碍事。
+
+写入的是 `.claude/settings.local.json` 而**不是** `settings.json` —— 后者会提交，那样没装 `sw` 的同事每次会话结束都会踩到一个失败的 hook。命令里带绝对 `-C <仓库>`，因为 hook 的工作目录不保证。
+
+hook 用的是 `sw ctx --if-reachable`：对端离线时静默退出 0。这个区分是刻意的 —— **不可达**是暂时状态（另一台机器睡着了），你无从下手；而**被拒绝**是配置错误，仍然会报错。
+
 ### 路径推导
 
 Claude Code 按项目**绝对路径**命名它的状态目录，把 `[A-Za-z0-9-]` 之外的字符全替换成 `-`：
