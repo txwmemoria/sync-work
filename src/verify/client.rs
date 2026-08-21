@@ -127,7 +127,7 @@ async fn attempt(
         desc.dimmed()
     );
 
-    let (mut tx, mut rx) = conn.open_bi().await?;
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     let req = Request::Verify(VerifyRequest {
         protocol: PROTOCOL_VERSION,
         project: cfg.project.name.clone(),

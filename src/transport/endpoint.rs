@@ -69,6 +69,56 @@ pub async fn connect(ep: &Endpoint, peer: &Peer) -> Result<iroh::endpoint::Conne
     })
 }
 
+/// Describe the live network paths of a connection: relay or direct, the remote
+/// transport address, and the round-trip time.
+///
+/// A connection starts out relayed and gains a direct path once holepunching
+/// succeeds, so this also answers "is my traffic actually going peer-to-peer?"
+/// — which is otherwise invisible.
+pub fn describe_paths(conn: &iroh::endpoint::Connection) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for p in conn.paths().iter() {
+        let kind = if p.is_relay() { "relay" } else { "direct" };
+        let selected = if p.is_selected() { "*" } else { "" };
+        parts.push(format!(
+            "{selected}{kind} {} {}ms",
+            p.remote_addr(),
+            p.rtt().as_millis()
+        ));
+    }
+    if parts.is_empty() {
+        "no path".into()
+    } else {
+        parts.join(", ")
+    }
+}
+
+/// Open a request stream, translating a refusal into something actionable.
+///
+/// When the far node does not recognise our key it closes the connection with
+/// the reason `unpaired`, which iroh reports as `closed by peer: unpaired
+/// (code 1)`. That is accurate and useless: the interesting part is *why* a
+/// machine that was paired no longer recognises us, and what to do about it.
+pub async fn open_request(
+    conn: &iroh::endpoint::Connection,
+) -> Result<(iroh::endpoint::SendStream, iroh::endpoint::RecvStream)> {
+    match conn.open_bi().await {
+        Ok(pair) => Ok(pair),
+        Err(e) => {
+            let text = e.to_string();
+            if text.contains("unpaired") {
+                bail!(
+                    "the peer refused us as unpaired. Its record of this machine's key is \
+                     stale — most often because this machine's identity was regenerated. \
+                     Re-pair: run `sw pair init` here, `sw pair join <ticket>` there. \
+                     `sw pair list` on both sides shows the keys they expect."
+                )
+            }
+            Err(anyhow::Error::new(e).context("could not open a request stream"))
+        }
+    }
+}
+
 /// Reject a connection whose remote key is not in this machine's peer table.
 pub fn authorize(machine: &Machine, remote: EndpointId) -> Result<(String, Peer)> {
     let remote = remote.to_string();

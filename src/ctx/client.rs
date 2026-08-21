@@ -143,7 +143,7 @@ async fn sync_with(
 }
 
 async fn fetch_manifests(conn: &Connection, project: &str) -> Result<(String, Vec<CtxRoot>)> {
-    let (mut tx, mut rx) = conn.open_bi().await?;
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     transport::write_json(
         &mut tx,
         &Request::CtxManifest {
@@ -168,7 +168,7 @@ async fn pull(
     remote_host: &str,
     totals: &mut Totals,
 ) -> Result<()> {
-    let (mut tx, mut rx) = conn.open_bi().await?;
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     transport::write_json(
         &mut tx,
         &Request::CtxFetch {
@@ -202,7 +202,7 @@ async fn push(
     paths: &[String],
     totals: &mut Totals,
 ) -> Result<()> {
-    let (mut tx, mut rx) = conn.open_bi().await?;
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     transport::write_json(
         &mut tx,
         &Request::CtxPush {

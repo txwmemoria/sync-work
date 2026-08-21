@@ -86,7 +86,7 @@ mod tests {
         set_enabled(false);
         assert_eq!("ok".green(), "ok");
         assert_eq!("ok".green().bold(), "ok", "chained styles must also vanish");
-        assert_eq!(format!("{}", 42.dimmed()), "42");
+        assert_eq!(42.dimmed(), "42");
         assert!(!"x".red().contains('\x1b'), "no escapes may reach a pipe");
 
         set_enabled(true);

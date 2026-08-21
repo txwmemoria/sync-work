@@ -81,10 +81,10 @@ async fn accept_loop(ep: iroh::Endpoint, machine: Machine, id: String) -> Result
             match incoming.await {
                 Ok(conn) => {
                     if let Err(e) = handle_connection(conn).await {
-                        eprintln!("{} {e:#}", "connection failed:".red());
+                        tracing::error!("connection failed: {e:#}");
                     }
                 }
-                Err(e) => eprintln!("{} {e}", "handshake failed:".red()),
+                Err(e) => tracing::warn!("handshake failed: {e}"),
             }
         });
     }
@@ -96,16 +96,29 @@ async fn handle_connection(conn: Connection) -> Result<()> {
 
     // Re-read so a machine paired since startup is recognised immediately.
     let machine = Machine::load()?;
+    let paths = transport::describe_paths(&conn);
     let (peer_name, _peer) = match transport::authorize(&machine, remote) {
         Ok(v) => v,
-        Err(e) => {
-            // Close rather than reply: an unpaired caller learns nothing about
-            // this machine beyond the fact that something is listening.
-            eprintln!("{} {e}", "refused:".yellow());
+        Err(_) => {
+            // The full key, not a prefix: an unpaired sender has no entry to look
+            // up, so this line is the only place the operator can see what key to
+            // expect. Truncating it here is what made this hard to diagnose.
+            tracing::warn!(
+                "refused unpaired peer {remote} via {paths}; \
+                 known peers: [{}]. If that is your other machine, its key changed \
+                 — re-pair with `sw pair init` / `sw pair join`",
+                machine
+                    .peers
+                    .iter()
+                    .map(|(n, p)| format!("{n}={:.12}", p.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
             conn.close(1u8.into(), b"unpaired");
             return Ok(());
         }
     };
+    tracing::info!("{peer_name} connected via {paths}");
 
     // A connection may carry several requests; loop until the peer hangs up.
     loop {
@@ -115,7 +128,7 @@ async fn handle_connection(conn: Connection) -> Result<()> {
             Err(_) => return Ok(()),
         };
         if let Err(e) = route(tx, rx, &peer_name).await {
-            eprintln!("{} {e:#}", "request failed:".red());
+            tracing::error!("{peer_name}: request failed: {e:#}");
         }
     }
 }
@@ -261,7 +274,7 @@ pub async fn ping(peer_name: Option<&str>) -> Result<()> {
 
 async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()> {
     let conn = transport::connect(ep, peer).await?;
-    let (mut tx, mut rx) = conn.open_bi().await?;
+    let (mut tx, mut rx) = transport::open_request(&conn).await?;
     transport::write_json(
         &mut tx,
         &Request::Ping {
@@ -281,6 +294,10 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
             println!("  name     {host}");
             println!("  platform {platform}");
             println!("  projects {repo}");
+            // Read after the exchange, not before: a connection begins relayed and
+            // only gains a direct path once holepunching succeeds, so sampling it
+            // immediately after `connect` would almost always say "relay".
+            println!("  path     {}", transport::describe_paths(&conn));
             Ok(())
         }
         Some(Event::Failed { message }) => {

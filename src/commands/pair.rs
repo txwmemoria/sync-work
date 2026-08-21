@@ -96,6 +96,14 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
             println!("{} {}", "this machine".bold(), machine.node_name());
             println!("  id       {:.16}…", identity.id_string());
             println!("  platform {}", Platform::current());
+            // Printed because a key mismatch is otherwise a filesystem hunt, and
+            // because this path is not always what the docs imply: on Windows an
+            // app container can redirect it, so two shells on the same machine
+            // may read different state.
+            match crate::config::machine::home() {
+                Ok(p) => println!("  state    {}", p.display()),
+                Err(e) => println!("  state    {} {e:#}", "unknown:".red()),
+            }
             if machine.peers.is_empty() {
                 println!("\nno peers; run `sw pair init`");
                 return Ok(0);

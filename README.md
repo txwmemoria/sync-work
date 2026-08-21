@@ -292,6 +292,16 @@ bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，1
 
 端到端覆盖单元测试到不了的部分：机器级配对、项目注册表、QUIC 传输、patch 传递、worktree 隔离、诊断回传、退出码透传、上下文同步。其中两项专门锁住本工具的核心主张 —— **两个项目共用一个节点和一次配对**，以及**对端未 link 时给出可操作的错误**。
 
+## 排查
+
+**`the peer refused us as unpaired`** —— 对端连上了但不认识你的公钥。它记录的是一个过期的 key，通常因为本机身份被重新生成过。两边各跑 `sw pair list` 对比：你的 `id` 和对端 peers 表里记的应该一致。不一致就重新配对。
+
+**`could not reach peer ...; is 'sw node' running there?`** —— 对端节点没在跑，或者网络不通。先确认对端有 `sw node`；确认了还不通就 `SW_LOG=debug sw status` 看握手细节。
+
+**两个 shell 报告不同的 `id`** —— `sw pair list` 会打印它实际使用的 state 目录，先对比这个。某些沙箱化的终端（如 Windows 应用容器）会重定向 `%APPDATA%`，导致同一台机器上不同 shell 读到不同的配置。**配对要在你日常使用的那个 shell 里做**，否则 ticket 里带的是另一份身份。
+
+**节点在做什么** —— 节点每收到一个请求打一行日志，含对端名、连接路径（direct/relay + 地址 + RTT）和结果。`sw status` 也会显示当前连接走的是直连还是 relay。
+
 ## 已知边界
 
 - **真实 Windows↔Mac 路径尚未实测。** 端到端测试的两个节点跑在同一台 Windows 上（靠 `SW_HOME` 区分身份）。平台相关代码都在，但没有对着真 Mac 跑过。
