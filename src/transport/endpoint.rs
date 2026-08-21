@@ -234,7 +234,6 @@ mod tests {
             id: "0".repeat(64),
             name: "mac-mini".into(),
             platform: Platform::Macos,
-            addr: None,
             acking: None,
         }
     }

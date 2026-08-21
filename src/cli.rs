@@ -60,6 +60,12 @@ pub enum Command {
     },
     /// List the projects registered on this machine.
     Projects,
+    /// Clear this machine's identity, peers and project registry, to set up again.
+    Reset {
+        /// Skip the confirmation prompt.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Check everything: identity, node, projects, peers, and build agreement.
     Doctor {
         /// Only check this peer.

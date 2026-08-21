@@ -7,7 +7,7 @@
 
 use crate::config::{Machine, Peer, Platform};
 use anyhow::{Context, Result};
-use iroh::{Endpoint, EndpointAddr, EndpointId};
+use iroh::{Endpoint, EndpointId};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 
@@ -16,16 +16,14 @@ use std::str::FromStr;
 /// Note what is absent: no repository path and no project name. A ticket
 /// describes a *machine*, so one pairing covers every project the two share.
 ///
-/// The addresses are included as a hint so a first connection on the same LAN
-/// does not have to wait on discovery, but they are not required: the id alone
-/// is enough once discovery resolves.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// No addresses either. An earlier version carried them "as a hint", but nothing
+/// ever read them: `as_peer` keeps only the key and platform, and `connect` dials
+/// by key alone. Removing them took the encoded ticket from 518 characters to 206.
+#[derive(Debug, Clone)]
 pub struct Ticket {
     pub id: String,
     pub name: String,
     pub platform: Platform,
-    #[serde(default)]
-    pub addr: Option<EndpointAddr>,
     /// When this ticket is a *reply*, the id of the machine it answers.
     ///
     /// Pairing is three commands: init, join, join back. From inside the second
@@ -33,19 +31,48 @@ pub struct Ticket {
     /// either way — so nothing local can tell whether another round trip is
     /// needed. Carrying the acknowledgement makes the final `join` able to say
     /// "done" instead of prompting for a fourth step that does nothing.
-    #[serde(default)]
     pub acking: Option<String>,
 }
 
 const TICKET_PREFIX: &str = "sw1";
 
+/// The on-the-wire form.
+///
+/// Separate from [`Ticket`] so the type people handle keeps readable strings while
+/// the encoded token stays short. JSON spent 64 characters of hex on a 32-byte key
+/// and repeated the field names in every ticket; postcard writes the key as bytes
+/// and the names not at all, which is the difference between 206 characters and
+/// about 70. Readability buys nothing here — the token is opaque base32 either
+/// way, unlike the wire protocol, where a packet dump is worth being able to read.
+#[derive(Serialize, Deserialize)]
+struct Wire {
+    key: [u8; 32],
+    name: String,
+    platform: Platform,
+    acking: Option<[u8; 32]>,
+}
+
+fn key_bytes(hex_id: &str) -> Result<[u8; 32]> {
+    let raw = hex::decode(hex_id).context("endpoint id is not hex")?;
+    raw.try_into()
+        .map_err(|_| anyhow::anyhow!("endpoint id is not 32 bytes"))
+}
+
 impl Ticket {
     /// Encode as a single copy-pasteable token. Base32 without padding survives
-    /// terminals, chat clients, and line wrapping better than base64 or raw JSON.
+    /// terminals, chat clients, and line wrapping better than base64 would.
     pub fn encode(&self) -> Result<String> {
-        let json = serde_json::to_vec(self)?;
-        let body = data_encoding::BASE32_NOPAD.encode(&json);
-        Ok(format!("{TICKET_PREFIX}:{body}"))
+        let wire = Wire {
+            key: key_bytes(&self.id)?,
+            name: self.name.clone(),
+            platform: self.platform,
+            acking: self.acking.as_deref().map(key_bytes).transpose()?,
+        };
+        let bytes = postcard::to_stdvec(&wire)?;
+        Ok(format!(
+            "{TICKET_PREFIX}:{}",
+            data_encoding::BASE32_NOPAD.encode(&bytes)
+        ))
     }
 
     pub fn decode(s: &str) -> Result<Self> {
@@ -57,8 +84,13 @@ impl Ticket {
         let raw = data_encoding::BASE32_NOPAD
             .decode(body.to_ascii_uppercase().as_bytes())
             .context("ticket is corrupt")?;
-        let t: Ticket =
-            serde_json::from_slice(&raw).context("ticket is not valid syncwork data")?;
+        let wire: Wire = postcard::from_bytes(&raw).context("ticket is not valid syncwork data")?;
+        let t = Ticket {
+            id: hex::encode(wire.key),
+            name: wire.name,
+            platform: wire.platform,
+            acking: wire.acking.map(hex::encode),
+        };
         EndpointId::from_str(&t.id).context("ticket contains an invalid endpoint id")?;
         Ok(t)
     }
@@ -78,15 +110,14 @@ pub async fn local_ticket(
     name: Option<String>,
     acking: Option<String>,
 ) -> Result<Ticket> {
-    // Wait for a relay handshake so the ticket carries a reachable address.
-    // Without this the first connection has to fall back to discovery, which
-    // makes pairing look flaky when it is merely slow.
+    // Waited on even though the ticket carries no address: coming online is what
+    // publishes this key to discovery, and the peer has to be able to find it
+    // there before the ticket is of any use.
     ep.online().await;
     Ok(Ticket {
         id: ep.id().to_string(),
         name: name.unwrap_or_else(|| machine.node_name()),
         platform: Platform::current(),
-        addr: Some(ep.addr()),
         acking,
     })
 }
@@ -101,7 +132,6 @@ mod tests {
             id: "0".repeat(64),
             name: "mac-mini".into(),
             platform: Platform::Macos,
-            addr: None,
             acking: None,
         }
     }
@@ -136,12 +166,23 @@ mod tests {
     }
 
     #[test]
-    fn tickets_carry_no_paths_or_project_names() {
-        // A ticket describes a machine. If it ever carried a repo path again,
-        // pairing would silently become per-project once more.
-        let json = serde_json::to_string(&sample()).unwrap();
-        assert!(!json.contains("repo"), "ticket leaked a path: {json}");
-        assert!(!json.contains("project"), "ticket leaked a project: {json}");
+    fn tickets_stay_short_enough_to_paste() {
+        // A ticket describes a machine, and the encoding carries no field names,
+        // so "does it leak a path" cannot be tested by searching for one. Length
+        // is the proxy that still catches it: a repository path or a project name
+        // would be tens of characters, well past this bound. It also guards the
+        // reason the encoding changed — this was 518 characters when it carried
+        // addresses nothing read, and 206 as JSON.
+        let n = sample().encode().unwrap().len();
+        assert!(n < 120, "ticket grew to {n} characters");
+
+        // A reply carries a second key, and must still be pasteable.
+        let reply = Ticket {
+            acking: Some("1".repeat(64)),
+            ..sample()
+        };
+        let n = reply.encode().unwrap().len();
+        assert!(n < 180, "reply ticket grew to {n} characters");
     }
 
     #[test]

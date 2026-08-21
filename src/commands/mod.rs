@@ -7,6 +7,7 @@ pub mod doctor;
 pub mod hook;
 pub mod pair;
 pub mod project;
+pub mod reset;
 
 use crate::cli::{Cli, Command, HookCmd, ServiceCmd, discover};
 use crate::config::Config;
@@ -35,6 +36,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             }
         }
         Command::Projects => project::list(),
+        Command::Reset { yes } => reset::run(yes),
         Command::Doctor { peer } => doctor::run(peer.as_deref()).await,
         Command::Service(cmd) => {
             match cmd {

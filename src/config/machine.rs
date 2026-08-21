@@ -11,14 +11,12 @@
 //!
 //! | lives in                        | holds                                  |
 //! |---------------------------------|----------------------------------------|
-//! | machine dir `config.toml`       | node name, peers, project registry     |
-//! | machine dir `identity.key`      | the secret key                         |
-//!
-//! The machine directory follows platform convention, so it is *not* the same
-//! path on both machines: `~/Library/Application Support/syncwork` on macOS,
-//! `%APPDATA%\syncwork\config` on Windows, `~/.config/syncwork` on Linux.
-//! `SW_HOME` overrides it.
+//! | `~/.syncwork/config.toml`       | node name, peers, project registry     |
+//! | `~/.syncwork/identity.key`      | the secret key                         |
 //! | `<repo>/syncwork.toml` (in git) | project name, recipes, context options |
+//!
+//! One path on every platform, deliberately in the home directory rather than the
+//! platform config directory — see [`home`] for why. `SW_HOME` overrides it.
 //!
 //! Peer entries carry no filesystem paths. Each machine records where a project
 //! lives on *its own* disk, so a project is joined across machines purely by the
@@ -33,18 +31,79 @@ use std::path::{Path, PathBuf};
 pub const CONFIG_FILE: &str = "config.toml";
 pub const IDENTITY_FILE: &str = "identity.key";
 
-/// Directory holding this machine's syncwork state.
+/// Directory holding this machine's syncwork state: `~/.syncwork`.
 ///
-/// `SW_HOME` overrides it, which is what lets two independent nodes run on one
-/// box — used by the end-to-end tests, and occasionally useful for an isolated
-/// second identity.
+/// The home directory, not the platform's config directory, because a sandboxed
+/// application can have its view of the latter redirected. Measured on Windows:
+/// the Claude desktop app is packaged, so its `%APPDATA%` reads and writes land
+/// in `AppData\Local\Packages\...\LocalCache\Roaming` — and an explicit absolute
+/// path does not escape it, since the redirection happens at path resolution.
+/// The result was two identities on one machine, one of which the peer had never
+/// been paired with, so anything `sw` ran from inside that app was refused.
+///
+/// `~/.claude` demonstrably is *not* redirected — the same session transcripts are
+/// visible from both — so state sits beside it. One path on every platform also
+/// means one thing to document instead of three.
+///
+/// `SW_HOME` still overrides, which is what lets two independent nodes run on one
+/// box (the end-to-end tests rely on it).
 pub fn home() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("SW_HOME") {
         return Ok(PathBuf::from(dir));
     }
-    let dirs = directories::ProjectDirs::from("", "", "syncwork")
-        .context("cannot determine the configuration directory")?;
-    Ok(dirs.config_dir().to_path_buf())
+    let base = directories::BaseDirs::new()
+        .map(|b| b.home_dir().to_path_buf())
+        .context("cannot determine the home directory")?;
+    let dir = base.join(".syncwork");
+
+    if !dir.exists()
+        && let Some(legacy) = legacy_dir()
+        && legacy.is_dir()
+    {
+        return Ok(migrate(&legacy, &dir));
+    }
+    Ok(dir)
+}
+
+/// Where state lived before: the platform config directory.
+fn legacy_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "syncwork").map(|d| d.config_dir().to_path_buf())
+}
+
+/// Move state to its new home, returning the directory to actually use.
+///
+/// On any failure the *old* path is returned rather than an error: a working
+/// pairing must not break because a move could not be completed. A copy is
+/// attempted if the rename fails, which it does when the two sit on different
+/// volumes.
+fn migrate(legacy: &Path, dir: &Path) -> PathBuf {
+    if std::fs::rename(legacy, dir).is_ok() {
+        eprintln!("moved syncwork state to {}", dir.display());
+        return dir.to_path_buf();
+    }
+    let copied = std::fs::create_dir_all(dir).is_ok()
+        && std::fs::read_dir(legacy)
+            .map(|entries| {
+                entries.filter_map(|e| e.ok()).all(|e| {
+                    e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                        && std::fs::copy(e.path(), dir.join(e.file_name())).is_ok()
+                })
+            })
+            .unwrap_or(false);
+    if copied {
+        eprintln!(
+            "copied syncwork state to {} (the old copy at {} is now unused)",
+            dir.display(),
+            legacy.display()
+        );
+        return dir.to_path_buf();
+    }
+    tracing::warn!(
+        "could not move syncwork state from {} to {}; continuing to use the old location",
+        legacy.display(),
+        dir.display()
+    );
+    legacy.to_path_buf()
 }
 
 // ---------------------------------------------------------------- identity

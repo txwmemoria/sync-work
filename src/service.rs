@@ -400,6 +400,15 @@ fn spawn_all(cmds: &[Vec<String>]) -> Result<()> {
     for cmd in cmds {
         Command::new(&cmd[0])
             .args(&cmd[1..])
+            // Detached from this process's streams, not merely unwaited. An
+            // inherited pipe outlives the parent, so a caller that reads our
+            // output — a shell substitution, a script, a CI step — waits for EOF
+            // on a handle the node holds open for as long as it runs, and
+            // `sw service install` appears to hang forever. The node's own output
+            // goes to its log file regardless.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .with_context(|| format!("could not start `{}`", cmd[0]))?;
     }
