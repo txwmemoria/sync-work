@@ -54,15 +54,60 @@ $ echo $?
 - **机器级**（在任何目录都能跑，不需要在仓库里）：`pair`、`node`、`service`、`projects`、`status`
 - **仓库级**（从当前目录或 `-C` 发现仓库）：`init`、`link`、`verify`、`ctx`
 
+## `sw node` 是什么，谁需要跑它
+
+`sw node` 是**接收方**。它常驻监听，把已配对机器发来的请求在本机执行：应用 patch、在 worktree 里跑配方、收发上下文文件。
+
+`sw verify` 和 `sw ctx` 是**发起方**，它们是一次性命令，**不需要本机有节点在跑**。
+
+所以规则很简单：**一台机器需要 `sw node`，当且仅当你希望另一台机器能请它干活。**
+
+| 你想要的 | 谁需要 `sw node` |
+|---|---|
+| 只在 Windows 开发，让 Mac 验证 | 只有 Mac |
+| 只在 Mac 开发，让 Windows 验证 | 只有 Windows |
+| **双向交叉验证**（两边都能发起） | **两台都要** |
+| 从任一侧 `sw ctx` 同步上下文 | 对端要 |
+
+因为设计上没有主机概念、任意一方都能发起，**两台都跑节点**才能真正双向。这也是 `sw service install` 存在的理由 —— 两台机器各装一次，之后不用再记得手动启动。
+
+节点和客户端互不干扰：一台机器可以同时跑着 `sw node` 服务对端，又用 `sw verify` 请对端干活。
+
 ## 安装
 
-两台机器都要装。需要 Rust 1.90+ 和 git。
+两台机器都要装。需要 Rust 1.91+（iroh 的下限）和 git。
 
 ```bash
-cargo install --path .
+cargo install --path . --locked
 ```
 
+`--locked` 不是可选的讲究：`cargo install` **默认会忽略 `Cargo.lock` 重新解析依赖**，两台机器装出来的依赖版本可能不同。加上它才保证双端构建一致。
+
 或直接用 `target/release/sw`（单文件，无运行时依赖）。
+
+## 更新
+
+```bash
+git pull && cargo install --path . --locked
+```
+
+`cargo install --path .` 直接替换已安装的二进制 —— 不需要 `--force`，版本号不变也会替换。
+
+**但更新完必须重启节点**，运行中的 `sw node` 用的是已加载进内存的旧代码。两个平台的失败方式不同，后者更危险：
+
+| 平台 | 节点正在运行时执行 install |
+|---|---|
+| Windows | **失败**：`failed to remove file ...sw.exe`（运行中的 exe 被文件锁占用） |
+| macOS / Linux | **成功**，但运行中的节点仍跑旧代码 —— 静默过期 |
+
+Windows 会当场报错，你不会搞错。POSIX 允许替换正在运行的可执行文件，所以 macOS 上 install 会显示成功，而节点行为毫无变化 —— 看起来像"更新没生效"。
+
+所以顺序固定为：**先停节点 → install → 重启节点**。
+
+```bash
+# 节点终端里 Ctrl-C，然后
+git pull && cargo install --path . --locked && sw node
+```
 
 ## 一次性设置
 
@@ -92,9 +137,14 @@ sw pair list      # 确认
 ### 2. 装开机自启（每台机器一次）
 
 ```bash
-sw service install
-sw service install --print   # 先看它会做什么
+sw service install           # 注册开机自启
+sw service install --print   # 先看它会做什么，不实际执行
+sw service status            # 是否已注册
+sw service restart           # 更新二进制后用它生效
+sw service uninstall
 ```
+
+**更新完一定要 `sw service restart`。** `install` 不等于重启：Windows 上 `schtasks /Create /F` 只重写任务定义，不会动已经在跑的那个进程，旧二进制会一直服务到下次登录。
 
 | 平台 | 机制 |
 |---|---|

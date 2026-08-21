@@ -254,6 +254,85 @@ pub fn build_plan() -> Result<Plan> {
     }
 }
 
+/// Run a list of commands in order.
+///
+/// `tolerate_first` covers the teardown step that several platforms need before
+/// a (re)start: stopping something that is not running is not an error.
+fn run_all(cmds: &[Vec<String>], tolerate_first: bool) -> Result<()> {
+    for (i, cmd) in cmds.iter().enumerate() {
+        match Command::new(&cmd[0]).args(&cmd[1..]).output() {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                if !(tolerate_first && i == 0 && cmds.len() > 1) {
+                    bail!(
+                        "`{}` failed: {}",
+                        cmd.join(" "),
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    );
+                }
+            }
+            Err(e) => bail!("could not run `{}`: {e}", cmd[0]),
+        }
+    }
+    Ok(())
+}
+
+/// Commands that stop and start the installed service again.
+///
+/// Needed because `install` is not a restart: on Windows `schtasks /Create /F`
+/// rewrites the task definition without touching the process already running
+/// from the previous one, so an updated binary would not take effect until the
+/// next logon.
+fn restart_commands(label: &str) -> Vec<Vec<String>> {
+    match Platform::current() {
+        // `kickstart -k` kills the running instance and starts it again in one
+        // step, which is what launchd offers instead of a restart verb.
+        Platform::Macos => vec![vec![
+            "launchctl".into(),
+            "kickstart".into(),
+            "-k".into(),
+            format!("gui/{}/{label}", unsafe_uid()),
+        ]],
+        Platform::Windows => vec![
+            vec![
+                "schtasks".into(),
+                "/End".into(),
+                "/TN".into(),
+                label.to_string(),
+            ],
+            vec![
+                "schtasks".into(),
+                "/Run".into(),
+                "/TN".into(),
+                label.to_string(),
+            ],
+        ],
+        Platform::Linux => vec![vec![
+            "systemctl".into(),
+            "--user".into(),
+            "restart".into(),
+            format!("{label}.service"),
+        ]],
+    }
+}
+
+/// Stop and start the service, so an updated binary takes effect.
+pub fn restart() -> Result<()> {
+    let plan = build_plan()?;
+    let cmds = restart_commands(&plan.label);
+    // The stop half is tolerated: restarting something already stopped should
+    // just start it.
+    run_all(&cmds, true).with_context(|| {
+        format!(
+            "could not restart {}; is it installed? try `sw service status`",
+            plan.label
+        )
+    })?;
+    println!("restarted {}", plan.label);
+    println!("node logs to {}", plan.log.display());
+    Ok(())
+}
+
 /// Render the plan without touching anything.
 pub fn print_plan() -> Result<()> {
     let plan = build_plan()?;
@@ -289,25 +368,9 @@ pub fn install() -> Result<()> {
         println!("wrote {}", f.display());
     }
 
-    for (i, cmd) in plan.commands.iter().enumerate() {
-        let out = Command::new(&cmd[0]).args(&cmd[1..]).output();
-        match out {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                // The first command is a best-effort teardown of any previous
-                // install; it legitimately fails when nothing was registered.
-                let tolerated = i == 0 && plan.commands.len() > 1;
-                if !tolerated {
-                    bail!(
-                        "`{}` failed: {}",
-                        cmd.join(" "),
-                        String::from_utf8_lossy(&o.stderr).trim()
-                    );
-                }
-            }
-            Err(e) => bail!("could not run `{}`: {e}", cmd[0]),
-        }
-    }
+    // The first command is a best-effort teardown of any previous install; it
+    // legitimately fails when nothing was registered yet.
+    run_all(&plan.commands, true)?;
 
     println!("installed {}", plan.label);
     println!("node logs to {}", plan.log.display());
@@ -482,6 +545,26 @@ mod tests {
             !u.contains("-C"),
             "service must not be bound to a single repo"
         );
+    }
+
+    #[test]
+    fn restart_actually_stops_before_starting() {
+        let cmds = restart_commands("syncwork-node");
+        assert!(!cmds.is_empty());
+        let flat: Vec<String> = cmds.iter().map(|c| c.join(" ")).collect();
+        match Platform::current() {
+            // launchd has no restart verb; -k is what makes kickstart replace a
+            // running instance rather than no-op.
+            Platform::Macos => assert!(flat[0].contains("kickstart -k"), "got {flat:?}"),
+            // Two steps: rewriting the task definition alone would leave the old
+            // process running until the next logon.
+            Platform::Windows => {
+                assert_eq!(flat.len(), 2, "got {flat:?}");
+                assert!(flat[0].contains("/End"));
+                assert!(flat[1].contains("/Run"));
+            }
+            Platform::Linux => assert!(flat[0].contains("restart")),
+        }
     }
 
     #[test]

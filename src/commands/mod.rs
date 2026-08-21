@@ -33,6 +33,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                         service::install()?
                     }
                 }
+                ServiceCmd::Restart => service::restart()?,
                 ServiceCmd::Uninstall => service::uninstall()?,
                 ServiceCmd::Status => service::status()?,
             }

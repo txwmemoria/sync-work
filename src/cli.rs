@@ -113,6 +113,8 @@ pub enum ServiceCmd {
         #[arg(long)]
         print: bool,
     },
+    /// Stop and start the service, so an updated binary takes effect.
+    Restart,
     /// Remove the registration.
     Uninstall,
     /// Report whether the node is registered.
