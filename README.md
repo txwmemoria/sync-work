@@ -375,3 +375,4 @@ src/
 - `sw tui` — ratatui 面板，机器状态、项目列表与构建历史
 - 超过两台机器时，一条命令让所有机器同时验证（`sw verify --all`）
 - Windows keep-alive（不用管理员权限的前提下）
+- `sw mcp` — 以 MCP 服务暴露 verify / handoff / ctx / status，给没有 shell 权限的 AI 宿主（如 ChatGPT 桌面版）用，并返回结构化 JSON 而非终端文本。有 shell 的工具（Claude Code）直接跑命令已经够好，所以等真在无 shell 宿主里需要时再做
