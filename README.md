@@ -386,6 +386,14 @@ peers
 
 **日志里 `served via` 怎么读** —— 列出的是这条连接的全部路径，`*` 标记实际选中的那条。每条新连接都从 relay 起步、几百毫秒后打洞切直连，所以连接上的**第一个**小请求（如 ctx 的 manifest）常显示 `*relay` —— 这不是直连失败，看同一连接后续的请求：搬数据的 push / fetch / verify 应该都是 `*ip:... 几毫秒`。
 
+**doctor 的 `lan` 行是黄的（mDNS 没发现对方）** —— 先在**两台**机器上各跑一次 `sw doctor` 对比。只有 Windows 黄、Mac 绿的话，几乎一定是 Windows 防火墙：Public/Domain 网络默认拦截入站 UDP 5353，系统自带的 mDNS 放行规则只给了系统服务。有管理员权限就放行（一次性）：
+
+```powershell
+New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$env:USERPROFILE\.cargoin\sw.exe" -Protocol UDP -LocalPort 5353 -Action Allow
+```
+
+没有管理员权限就接受单向：Mac 仍能在局域网里发现 Windows（广播出站不受影响），只是反方向的无外网建联做不到。两台都黄，则是网络本身过滤跨主机组播（企业 AP 隔离），mDNS 在该网络帮不上忙。
+
 **两个 shell 报告不同的 `id`** —— `sw pair list` 会打印实际使用的状态目录，先对比这个。配对要在你日常使用的那个 shell 里做。
 
 想从零重来：`sw reset`（`--yes` 跳过确认）。只删本机自己的东西 —— 不碰仓库的 `syncwork.toml`、`.sw/` 缓存、`~/.claude`。删除前列出将失去什么，并提醒本机换新身份后**两边都要重新配对**。

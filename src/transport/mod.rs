@@ -6,7 +6,7 @@ pub mod message;
 pub mod ticket;
 
 pub use endpoint::{
-    authorize, connect, describe_paths, explain, note_self_relay, open_request, refusal,
+    authorize, connect, describe_paths, explain, lan_probe, note_self_relay, open_request, refusal,
     self_relay, verify_delegation, with_endpoint, with_machine_endpoint,
 };
 pub use frame::{

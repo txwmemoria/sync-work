@@ -180,6 +180,7 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
             r.ok(name, format!("{host} reachable"));
             r.note(paths);
             address(r, peer);
+            lan(r, peer).await;
             // Reaching it at all proves the keys agree: the peer authorises by
             // public key, so a stale record on its side would have refused us.
             r.ok("keys", "agree (the peer accepted this machine's key)");
@@ -213,6 +214,41 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
                 r.warn(name, "not reachable");
                 r.note(text);
                 address(r, peer);
+                lan(r, peer).await;
+            }
+        }
+    }
+}
+
+/// Report whether the peer is visible on the local network, by mDNS alone.
+///
+/// This answers a question no other check does: "would the pair still work with
+/// the internet gone". Dialling cannot answer it (a successful dial may have
+/// gone through the relay), the logs cannot either — and on an office network
+/// there is no cable to pull that severs the internet while keeping the LAN.
+/// A warning is not a failure: a peer on another network is simply elsewhere,
+/// and everything still works over the relay.
+async fn lan(r: &mut Report, peer: &crate::config::Peer) {
+    match transport::lan_probe(peer, std::time::Duration::from_secs(3)).await {
+        Some(addrs) => r.ok(
+            "lan",
+            format!(
+                "found by mDNS at {} — works without internet",
+                addrs.join(", ")
+            ),
+        ),
+        None => {
+            r.warn(
+                "lan",
+                "not found by mDNS (different network, or multicast filtered)",
+            );
+            r.note("dialling this peer then depends on the relay being reachable");
+            // Diagnosed on a real machine: the default inbound policy blocks UDP
+            // 5353 to sw.exe on Domain/Public networks, and the built-in mDNS
+            // allow rule is bound to the system's dnscache service, not to us.
+            // Outbound is open, so the *other* side may still discover this one.
+            if crate::config::Platform::current() == crate::config::Platform::Windows {
+                r.note("on Windows this is usually the firewall blocking inbound mDNS — see README troubleshooting");
             }
         }
     }

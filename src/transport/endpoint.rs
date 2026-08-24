@@ -140,6 +140,47 @@ pub fn verify_delegation(
     authorize(machine, signer)
 }
 
+/// Ask the local network — and only the local network — whether a peer is there.
+///
+/// A standalone mDNS lookup, deliberately not the endpoint's combined services:
+/// the question is not "can I reach the peer" (dialling answers that) but
+/// "would I still find it with the internet gone". Only an mDNS-only probe
+/// isolates that, and it is the one answer that cannot be read off any log —
+/// on an office network there is no cable to pull that severs the internet but
+/// keeps the LAN.
+///
+/// `None` means nobody answered within the wait: a different network, or a
+/// network that filters multicast between hosts. Everything still works there —
+/// dialling just keeps depending on the relay.
+pub async fn lan_probe(peer: &Peer, wait: std::time::Duration) -> Option<Vec<String>> {
+    use futures_lite::StreamExt;
+
+    let id = EndpointId::from_str(&peer.id).ok()?;
+    // A throwaway identity for the probe itself; with advertise off it only
+    // listens and queries, announcing nothing.
+    let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder()
+        .advertise(false)
+        .build(iroh::SecretKey::generate().public())
+        .ok()?;
+    let mut stream = iroh::address_lookup::AddressLookup::resolve(&mdns, id)?;
+
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(info))) => {
+                let addrs: Vec<String> = info.ip_addrs().map(|a| a.to_string()).collect();
+                // An entry with no IP addresses proves nothing about the LAN;
+                // keep listening until the deadline.
+                if !addrs.is_empty() {
+                    return Some(addrs);
+                }
+            }
+            Ok(Some(Err(_))) => continue,
+            Ok(None) | Err(_) => return None,
+        }
+    }
+}
+
 /// Where to dial a peer: its key, plus the last address it gave us.
 ///
 /// Both, not either. The key is what discovery resolves and never changes; the

@@ -3210,6 +3210,7 @@ dependencies = [
  "clap",
  "data-encoding",
  "directories",
+ "futures-lite",
  "gethostname",
  "hex",
  "iroh",
