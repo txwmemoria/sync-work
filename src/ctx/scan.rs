@@ -58,8 +58,21 @@ pub fn scan(root: &Root) -> Result<CtxRoot> {
             entries: Vec::new(),
         });
     }
-    let mut entries = Vec::new();
-    walk(&root.dir, &root.dir, &mut entries)?;
+    let mut found = Vec::new();
+    walk(&root.dir, &root.dir, &mut found)?;
+    let mut entries: Vec<CtxEntry> = found
+        .into_iter()
+        .filter_map(|f| {
+            Some(CtxEntry {
+                // A file being rewritten right now may fail to read; the next
+                // sync will pick it up.
+                hash: hash_file(&f.path).ok()?,
+                path: f.rel,
+                size: f.size,
+                mtime_ms: f.mtime_ms,
+            })
+        })
+        .collect();
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     Ok(CtxRoot {
         key: root.key.clone(),
@@ -68,7 +81,19 @@ pub fn scan(root: &Root) -> Result<CtxRoot> {
     })
 }
 
-fn walk(base: &Path, dir: &Path, out: &mut Vec<CtxEntry>) -> Result<()> {
+/// One file the walk turned up, before anything reads its contents.
+///
+/// Hashing is deliberately not part of the traversal: [`fingerprint`] needs the
+/// same rules about what counts as a file — no symlinks, no conflict copies, size
+/// bounded — but must not read a byte.
+struct Found {
+    rel: String,
+    path: PathBuf,
+    size: u64,
+    mtime_ms: u64,
+}
+
+fn walk(base: &Path, dir: &Path, out: &mut Vec<Found>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -98,20 +123,40 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<CtxEntry>) -> Result<()> {
         if meta.len() > MAX_FILE {
             continue;
         }
-        let hash = match hash_file(&path) {
-            Ok(h) => h,
-            // A file being rewritten right now may fail to read; the next sync
-            // will pick it up.
-            Err(_) => continue,
-        };
-        out.push(CtxEntry {
-            path: rel,
+        out.push(Found {
+            rel,
+            path,
             size: meta.len(),
             mtime_ms: mtime_ms(&meta),
-            hash,
         });
     }
     Ok(())
+}
+
+/// A cheap summary of what these roots hold right now: names, sizes, mtimes.
+///
+/// `--watch` calls this every couple of seconds, so it must not read file
+/// contents — hashing every session transcript at that rate would cost more than
+/// the sync it is waiting for. It only has to answer "did anything move"; the
+/// manifest exchange still decides what actually differs, by hash.
+pub fn fingerprint(roots: &[Root]) -> u64 {
+    let mut h = blake3::Hasher::new();
+    for root in roots {
+        h.update(root.key.as_bytes());
+        let mut found = Vec::new();
+        // An unreadable or absent root contributes nothing but its name, so it
+        // becoming readable later registers as a change.
+        if root.dir.is_dir() {
+            let _ = walk(&root.dir, &root.dir, &mut found);
+        }
+        found.sort_by(|a, b| a.rel.cmp(&b.rel));
+        for f in found {
+            h.update(f.rel.as_bytes());
+            h.update(&f.size.to_le_bytes());
+            h.update(&f.mtime_ms.to_le_bytes());
+        }
+    }
+    u64::from_le_bytes(h.finalize().as_bytes()[..8].try_into().expect("8 bytes"))
 }
 
 /// Relative paths travel with forward slashes so both platforms agree on identity.
@@ -152,8 +197,8 @@ pub fn read_for_send(root: &Path, rel: &str) -> Result<(Vec<u8>, u64)> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::roots::ROOT_CLAUDE;
     use super::*;
+    use crate::config::repo::ROOT_CLAUDE;
 
     #[test]
     fn peer_supplied_paths_cannot_escape_the_root() {

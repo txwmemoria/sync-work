@@ -9,7 +9,9 @@ pub use endpoint::{
     authorize, connect, describe_paths, explain, note_self_relay, open_request, refusal,
     self_relay, with_endpoint,
 };
-pub use frame::{read_event, read_frame, read_json, write_frame, write_json, write_request};
+pub use frame::{
+    push_json, read_event, read_frame, read_json, write_frame, write_json, write_request,
+};
 pub use message::{
     ALPN, CtxEntry, CtxFrame, CtxRoot, Diagnostic, Envelope, Event, HandoffResult,
     PROTOCOL_VERSION, Request, VerifyRequest, version_mismatch,

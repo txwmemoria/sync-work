@@ -19,11 +19,53 @@ use crate::config::{Identity, Machine, Platform};
 use crate::style::Paint;
 use crate::transport::{self, CtxFrame, Event, PROTOCOL_VERSION, Request, version_mismatch};
 use crate::{ctx, git, handoff, verify};
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use std::path::Path;
 
+/// Name of the lock that enforces one node per state directory.
+const LOCK_FILE: &str = "node.lock";
+
+/// Take the machine's node lock, or explain who has it.
+///
+/// Two nodes on one machine share its identity and both register for it at the
+/// relay, so a request lands on whichever won the race while the other sits idle —
+/// and the loser may be running older code, or holding a worktree mid-build.
+/// Testing this tool produced three at once without noticing.
+///
+/// An OS file lock rather than a pid file: the kernel drops it when the process
+/// ends, however it ends, so there is no stale state to detect or clean up. The
+/// returned handle must outlive the node, which is why it is returned rather than
+/// dropped here.
+fn acquire_lock() -> Result<std::fs::File> {
+    let dir = crate::config::machine::home()?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let path = dir.join(LOCK_FILE);
+    let file = std::fs::File::create(&path)
+        .with_context(|| format!("could not open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(std::fs::TryLockError::WouldBlock) => bail!(
+            "another `sw node` is already running on this machine — it holds {}. \
+             Stop it with `sw service stop`, or set SW_HOME to run an independent \
+             node against its own state directory.",
+            path.display()
+        ),
+        // A filesystem that cannot lock (some network mounts) must not stop the
+        // node from running: losing the guard is worse than losing the node.
+        Err(std::fs::TryLockError::Error(e)) => {
+            tracing::warn!(
+                "cannot lock {}: {e}; not checking for a second node",
+                path.display()
+            );
+            Ok(file)
+        }
+    }
+}
+
 pub async fn serve() -> Result<()> {
+    // Held for the lifetime of the node, released by the OS when it exits.
+    let _lock = acquire_lock()?;
     let machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
     let id = identity.id_string();

@@ -28,7 +28,9 @@ pub struct Recipe {
     /// blob. This is what lets an AI act on a remote failure directly.
     #[serde(default = "default_true")]
     pub cargo_json: bool,
-    #[serde(default)]
+    /// Skipped when empty so the file `sw init` writes has no empty `[env]` tables
+    /// in it — a starter config should read as an example, not as a form.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub windows: Option<Box<RecipeOverride>>,
@@ -46,7 +48,7 @@ fn default_true() -> bool {
 pub struct RecipeOverride {
     pub steps: Option<Vec<String>>,
     pub cargo_json: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
 }
 
@@ -102,33 +104,99 @@ fn default_remote() -> String {
     "origin".into()
 }
 
+/// How to find one context root on whichever machine is asking.
+///
+/// Declared rather than hardcoded because there is more than one AI tool, and the
+/// only thing they have in common is that their state lives *outside* the repo and
+/// so never travels by git. What differs is where — and that is a fact about the
+/// tool, which belongs in the committed config where both machines read the same
+/// answer, not in per-machine setup that has to be repeated and kept in step.
+///
+/// Deliberately not a path: an absolute path from one machine is meaningless on the
+/// other. Each variant is a *rule* both machines evaluate locally, so the wire only
+/// ever carries the root's name.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum RootSpec {
+    /// Claude Code's per-project directory, whose name it derives from the
+    /// checkout's absolute path. Its own rule because that encoding is a Claude
+    /// Code implementation detail, verified against a real installation.
+    ClaudeProject,
+    /// A path under the user's home directory — `.codex/sessions`, say. The shape
+    /// most tools have: same relative location on every machine, different home.
+    Home {
+        path: String,
+        /// Environment variable that overrides the home directory when set, for a
+        /// tool that offers one.
+        #[serde(default)]
+        env: Option<String>,
+    },
+    /// A path inside the checkout, for state git does not track. Anything committed
+    /// already travels by git and does not belong here.
+    Repo { path: String },
+}
+
 /// What `sw ctx` carries between the machines.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ContextConfig {
-    /// Sync Claude Code's per-project session and memory directory. Each machine
-    /// derives the directory name from its own checkout path.
-    #[serde(default = "default_true")]
-    pub claude: bool,
-    /// Additional repo-relative directories. Intended for state git does not
-    /// track; anything committed already travels by git.
+    /// Named roots to sync. The name is the only thing that crosses the wire; each
+    /// machine resolves it against its own filesystem.
     #[serde(default)]
-    pub extra: Vec<String>,
+    pub roots: BTreeMap<String, RootSpec>,
     /// Leave alone any file touched this recently — it is probably being written
     /// right now by a live session.
     #[serde(default = "default_quiet_secs")]
     pub quiet_secs: u64,
+
+    // ---- superseded by `roots`, still read so an existing checkout keeps working
+    /// Was: sync Claude Code's directory. `None` means the file predates `roots`
+    /// and should get the old default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claude: Option<bool>,
+    /// Was: additional repo-relative directories.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra: Vec<String>,
 }
 
 fn default_quiet_secs() -> u64 {
     5
 }
 
+/// Name of the root every project gets unless it says otherwise.
+pub const ROOT_CLAUDE: &str = "claude";
+
+impl ContextConfig {
+    /// The roots to sync, with the pre-`roots` fields folded in.
+    ///
+    /// A `syncwork.toml` is committed, so both checkouts read the identical file
+    /// and an old one must keep working rather than silently syncing nothing —
+    /// which is what a plain rename of these fields would have caused, on a
+    /// feature whose failure mode is "no context moved" and nobody notices.
+    pub fn resolved_roots(&self) -> BTreeMap<String, RootSpec> {
+        let mut out = self.roots.clone();
+        // The old default: Claude on unless explicitly disabled. Only applied when
+        // `roots` says nothing about it, so a config that deliberately drops it is
+        // respected.
+        if !out.contains_key(ROOT_CLAUDE) && self.claude.unwrap_or(self.roots.is_empty()) {
+            out.insert(ROOT_CLAUDE.to_string(), RootSpec::ClaudeProject);
+        }
+        for path in &self.extra {
+            out.insert(
+                format!("extra:{path}"),
+                RootSpec::Repo { path: path.clone() },
+            );
+        }
+        out
+    }
+}
+
 impl Default for ContextConfig {
     fn default() -> Self {
         Self {
-            claude: true,
-            extra: Vec::new(),
+            roots: BTreeMap::from([(ROOT_CLAUDE.to_string(), RootSpec::ClaudeProject)]),
             quiet_secs: default_quiet_secs(),
+            claude: None,
+            extra: Vec::new(),
         }
     }
 }
@@ -209,6 +277,89 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `syncwork.toml` is committed, so both machines read the identical file and
+    /// one written before `roots` existed has to keep working. The failure mode of
+    /// getting this wrong is silent — no context moves, and nobody notices for a
+    /// week — so each legacy shape is pinned here.
+    #[test]
+    fn a_config_predating_declared_roots_still_syncs_what_it_used_to() {
+        // Nothing said about context at all: Claude, as before.
+        let bare: Config = toml::from_str("[project]\nname = \"demo\"\n").unwrap();
+        assert_eq!(
+            bare.context.resolved_roots(),
+            BTreeMap::from([(ROOT_CLAUDE.into(), RootSpec::ClaudeProject)])
+        );
+
+        // The old fields, both of them.
+        let legacy: Config = toml::from_str(
+            "[project]\nname = \"demo\"\n\n[context]\nclaude = true\nextra = [\"notes\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            legacy.context.resolved_roots(),
+            BTreeMap::from([
+                (ROOT_CLAUDE.into(), RootSpec::ClaudeProject),
+                (
+                    "extra:notes".into(),
+                    RootSpec::Repo {
+                        path: "notes".into()
+                    }
+                ),
+            ])
+        );
+
+        // And an explicit opt-out stays opted out.
+        let off: Config =
+            toml::from_str("[project]\nname = \"demo\"\n\n[context]\nclaude = false\n").unwrap();
+        assert!(off.context.resolved_roots().is_empty());
+    }
+
+    #[test]
+    fn declared_roots_carry_their_own_rule_for_finding_the_directory() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [project]
+            name = "demo"
+
+            [context.roots.claude]
+            kind = "claude-project"
+
+            [context.roots.codex]
+            kind = "home"
+            path = ".codex/sessions"
+
+            [context.roots.notes]
+            kind = "repo"
+            path = "docs/ai"
+            "#,
+        )
+        .unwrap();
+        let roots = cfg.context.resolved_roots();
+        assert_eq!(roots.len(), 3);
+        assert_eq!(roots["claude"], RootSpec::ClaudeProject);
+        assert_eq!(
+            roots["codex"],
+            RootSpec::Home {
+                path: ".codex/sessions".into(),
+                env: None
+            }
+        );
+        assert_eq!(
+            roots["notes"],
+            RootSpec::Repo {
+                path: "docs/ai".into()
+            }
+        );
+
+        // Declaring roots without a `claude` entry means exactly that — the old
+        // default must not sneak back in and sync a directory nobody asked for.
+        let without: Config = toml::from_str(
+            "[project]\nname = \"demo\"\n\n[context.roots.notes]\nkind = \"repo\"\npath = \"d\"\n",
+        )
+        .unwrap();
+        assert!(!without.context.resolved_roots().contains_key(ROOT_CLAUDE));
+    }
 
     #[test]
     fn platform_override_replaces_steps_and_merges_env() {

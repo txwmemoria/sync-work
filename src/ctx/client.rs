@@ -19,7 +19,22 @@ pub struct Options {
     /// would be noise about a condition the user cannot act on. A *refused*
     /// peer is still an error: that is a misconfiguration, not a transient.
     pub if_reachable: bool,
+    /// Keep running, syncing whenever the local roots change.
+    ///
+    /// The Stop hook already covers "a session ended", which is the moment that
+    /// matters most. This covers the rest: a long session where you want to move
+    /// machines mid-thought, and pulling what the *other* machine wrote without
+    /// having to remember to ask.
+    pub watch: bool,
 }
+
+/// How often `--watch` looks at the local roots. Cheap — names, sizes and mtimes,
+/// no file contents — so this can be short enough to feel immediate.
+const POLL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Polls between syncs that run even with nothing changed locally, so the *peer's*
+/// writes get pulled. Watching only local files would make this a one-way sync.
+const HEARTBEAT_POLLS: u32 = 30;
 
 /// Totals reported at the end of a run.
 #[derive(Default)]
@@ -32,7 +47,18 @@ struct Totals {
     identical: usize,
 }
 
-pub async fn sync(repo: &Path, opts: Options) -> Result<i32> {
+impl Options {
+    /// Whether to narrate a sync that did nothing.
+    ///
+    /// A one-shot run should say what it found, even if that is "in sync" — it was
+    /// asked a question and silence is not an answer. A watch is the opposite: it
+    /// runs for hours and must only speak when something actually moved.
+    fn chatty(&self) -> bool {
+        !self.watch
+    }
+}
+
+pub async fn sync(repo: &Path, mut opts: Options) -> Result<i32> {
     let cfg = Config::load(repo)?;
     let machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
@@ -40,13 +66,82 @@ pub async fn sync(repo: &Path, opts: Options) -> Result<i32> {
 
     let roots = ctx::resolve_roots(&cfg, repo);
     if roots.is_empty() {
-        bail!("nothing to sync: [context] has claude = false and no extra paths");
+        bail!(
+            "nothing to sync: no context roots resolve on this machine. Declare one \
+             under `[context.roots]` in {}",
+            crate::config::CONFIG_FILE
+        );
     }
+    if opts.watch && opts.dry_run {
+        bail!(
+            "--watch and --dry-run contradict each other: one waits to write, the other never does"
+        );
+    }
+    // A watch is unattended by definition, and the other machine being asleep is
+    // the normal state, not a failure to report every minute.
+    opts.if_reachable |= opts.watch;
 
+    // One endpoint for the whole run, including a watch that lasts hours: binding
+    // costs a socket and a relay handshake, and paying that every two seconds would
+    // dwarf the sync.
     transport::with_endpoint(&identity, |ep| async move {
-        sync_with(&ep, &cfg, &peer, &peer_name, &roots, &opts).await
+        if opts.watch {
+            watch(&ep, &cfg, &peer, &peer_name, &roots, &opts).await
+        } else {
+            sync_with(&ep, &cfg, &peer, &peer_name, &roots, &opts).await
+        }
     })
     .await
+}
+
+/// Sync on every local change, and periodically regardless, until interrupted.
+///
+/// Failures do not end the loop. The whole point is to be left running, and the
+/// peer going to sleep, the network dropping, or a laptop lid closing are all
+/// normal — a watch that exited on the first of them would be useless precisely
+/// when it is meant to be unattended.
+async fn watch(
+    ep: &iroh::Endpoint,
+    cfg: &Config,
+    peer: &Peer,
+    peer_name: &str,
+    roots: &[Root],
+    opts: &Options,
+) -> Result<i32> {
+    eprintln!(
+        "{} {peer_name}, {} root{} — syncing on change, ctrl-c to stop",
+        "watch".bold(),
+        roots.len(),
+        if roots.len() == 1 { "" } else { "s" }
+    );
+
+    let mut seen = ctx::fingerprint(roots);
+    // Starts at the limit so the first pass syncs immediately rather than after a
+    // minute of looking idle.
+    let mut polls_since_sync = HEARTBEAT_POLLS;
+
+    loop {
+        let now = ctx::fingerprint(roots);
+        if now != seen || polls_since_sync >= HEARTBEAT_POLLS {
+            seen = now;
+            polls_since_sync = 0;
+            // Reported and swallowed: see above. `if_reachable` already keeps a
+            // sleeping peer quiet, so anything that reaches here is worth a line.
+            if let Err(e) = sync_with(ep, cfg, peer, peer_name, roots, opts).await {
+                eprintln!("{} {e:#}", "watch".yellow().bold());
+            }
+        } else {
+            polls_since_sync += 1;
+        }
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("{} stopped", "watch".dimmed());
+                return Ok(0);
+            }
+            _ = tokio::time::sleep(POLL) => {}
+        }
+    }
 }
 
 async fn sync_with(
@@ -60,7 +155,9 @@ async fn sync_with(
     let conn = match transport::connect(ep, peer).await {
         Ok(c) => c,
         Err(e) if opts.if_reachable => {
-            eprintln!("{} {peer_name} is not reachable, skipping", "ctx".dimmed());
+            if opts.chatty() {
+                eprintln!("{} {peer_name} is not reachable, skipping", "ctx".dimmed());
+            }
             tracing::debug!("skipped context sync: {e:#}");
             return Ok(0);
         }
@@ -85,7 +182,9 @@ async fn exchange(
     // single consistent view rather than drifting between round trips.
     let project = &cfg.project.name;
     let (remote_host, remote_roots) = fetch_manifests(conn, project).await?;
-    eprintln!("{} {peer_name} ({remote_host})", "ctx".bold());
+    if opts.chatty() {
+        eprintln!("{} {peer_name} ({remote_host})", "ctx".bold());
+    }
 
     let quiet_ms = cfg.context.quiet_secs.saturating_mul(1000);
     let now = ctx::now_ms();
@@ -111,7 +210,9 @@ async fn exchange(
 
         let label = root.key.cyan().to_string();
         if plan.is_empty() && plan.skipped.is_empty() {
-            eprintln!("  {label} in sync ({} files)", plan.identical);
+            if opts.chatty() {
+                eprintln!("  {label} in sync ({} files)", plan.identical);
+            }
         } else {
             eprintln!(
                 "  {label}  {} to pull, {} to push, {} identical",
@@ -147,6 +248,11 @@ async fn exchange(
         return Ok(0);
     }
 
+    // A watch that reported "0 pulled, 0 pushed" every minute would bury the lines
+    // that matter.
+    if !opts.chatty() && totals.pulled == 0 && totals.pushed == 0 && totals.conflicts == 0 {
+        return Ok(0);
+    }
     let mut parts = vec![
         format!("{} pulled", totals.pulled),
         format!("{} pushed", totals.pushed),

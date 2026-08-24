@@ -114,6 +114,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             peer,
             dry_run,
             if_reachable,
+            watch,
         } => {
             let repo = discover(&cli.repo).await?;
             let cfg = Config::load(&repo)?;
@@ -124,6 +125,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
                     peer,
                     dry_run,
                     if_reachable,
+                    watch,
                 },
             )
             .await

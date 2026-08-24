@@ -142,6 +142,18 @@ grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0
   || { head -3 "$LAB/node.log"; fail "log timestamps are not local time with an offset"; }
 echo ok
 
+step "a second node on the same state directory is refused"
+# Two nodes share the machine's identity and both register for it at the relay, so
+# a request lands on whichever won the race while the other sits idle — possibly
+# running older code, possibly holding a worktree mid-build.
+OUT=$(b "$LAB" node 2>&1); RC=$?
+[ "$RC" -ne 0 ] || { echo "$OUT"; fail "a second node started anyway"; }
+grep -q "already running" <<<"$OUT" || { echo "$OUT"; fail "refusal does not say why"; }
+# Named, so the reader knows which file to look at and that SW_HOME is the way to
+# run a second node deliberately.
+grep -q "node.lock" <<<"$OUT" || { echo "$OUT"; fail "refusal does not name the lock"; }
+echo "PASS second node refused, exit $RC"
+
 step "sw status works from outside a repo and reports both projects"
 OUT=$(a "$LAB" status) || { echo "$OUT"; fail "status"; }
 grep -q "widget" <<<"$OUT" || { echo "$OUT"; fail "status did not report widget"; }
@@ -344,5 +356,53 @@ grep -q "pending.jsonl" "$LAB/c5.err" || { cat "$LAB/c5.err"; fail "dry-run did 
 grep -q "nothing written" "$LAB/c5.err" || fail "dry-run did not announce itself"
 [ -f "$CLAUDE_B/pending.jsonl" ] && fail "dry-run wrote to the peer"
 echo "PASS dry-run is inert"
+
+step "ctx: a declared root for a tool that is not Claude Code"
+# The point of declared roots: another AI tool's state syncs by writing a rule into
+# the committed config, with no code change and no per-machine setup. `repo` kind
+# here because it is the one shape both machines resolve identically, so the test
+# does not depend on either machine's home directory.
+for m in A B; do
+  (cd "$LAB/$m/gadget" && cat >> syncwork.toml <<'TOML'
+
+[context.roots.othertool]
+kind = "repo"
+path = ".othertool"
+TOML
+  )
+done
+mkdir -p "$LAB/A/gadget/.othertool"
+printf 'chat log\n' > "$LAB/A/gadget/.othertool/history.md"
+a "A/gadget" ctx > "$LAB/c6.out" 2> "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "ctx with a declared root failed"; }
+[ -f "$LAB/B/gadget/.othertool/history.md" ] \
+  || { cat "$LAB/c6.err"; fail "the declared root did not reach B"; }
+grep -q "othertool" "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "the root is not named in the report"; }
+# And the built-in root is still synced alongside it, not replaced by it.
+grep -q "claude" "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "declaring a root dropped claude"; }
+echo "PASS declared root synced, alongside the built-in one"
+
+step "ctx --watch: picks up a change without being asked again"
+# Left running in the background, as it would be in real use.
+rm -f "$CLAUDE_A/pending.jsonl"
+(cd "$LAB/A/widget" && exec env SW_HOME="$LAB/hA" CLAUDE_CONFIG_DIR="$LAB/claudeA" \
+   "$SW" ctx --watch > "$LAB/w.out" 2> "$LAB/w.err") &
+WATCH_PID=$!
+for _ in $(seq 1 40); do
+  grep -q "syncing on change" "$LAB/w.err" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q "syncing on change" "$LAB/w.err" || { cat "$LAB/w.err"; kill $WATCH_PID 2>/dev/null; fail "watch did not start"; }
+# A file appearing after the watch is already running is the whole point.
+printf '{"turn":2}\n' > "$CLAUDE_A/watched.jsonl"
+for _ in $(seq 1 40); do
+  [ -f "$CLAUDE_B/watched.jsonl" ] && break
+  sleep 0.5
+done
+kill $WATCH_PID 2>/dev/null; wait $WATCH_PID 2>/dev/null
+[ -f "$CLAUDE_B/watched.jsonl" ] || { cat "$LAB/w.err"; fail "watch did not sync the new file"; }
+# And it must stay quiet while nothing is happening, or an hours-long watch buries
+# the lines that matter under one report per minute.
+grep -q "in sync" "$LAB/w.err" && { cat "$LAB/w.err"; fail "watch narrates idle polls"; }
+echo "PASS watch synced a change and stayed quiet otherwise"
 
 step "ALL CHECKS PASSED"

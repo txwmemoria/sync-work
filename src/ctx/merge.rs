@@ -154,9 +154,9 @@ fn conflict_path(dest: &Path, host: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::super::roots::ROOT_CLAUDE;
     use super::super::scan::mtime_ms;
     use super::*;
+    use crate::config::repo::ROOT_CLAUDE;
 
     fn entry(path: &str, size: u64, mtime: u64, hash: &str) -> CtxEntry {
         CtxEntry {

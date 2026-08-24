@@ -41,6 +41,22 @@ pub async fn write_json<T: Serialize>(tx: &mut SendStream, value: &T) -> Result<
     write_frame(tx, &serde_json::to_vec(value)?).await
 }
 
+/// Append one framed value to a buffer instead of writing it.
+///
+/// Lets a producer pack everything already queued into a single write. The bytes
+/// are byte-for-byte what sending them one at a time produces — the reader still
+/// sees a stream of length-prefixed frames — so this changes nothing about the
+/// protocol, only how many writes it takes to emit it.
+pub fn push_json<T: Serialize>(out: &mut Vec<u8>, value: &T) -> Result<()> {
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.len() > MAX_FRAME {
+        bail!("frame of {} bytes exceeds limit", bytes.len());
+    }
+    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(&bytes);
+    Ok(())
+}
+
 /// Write the first frame of a request stream: the request, and where we live.
 ///
 /// Every request goes through here rather than through [`write_json`] directly, so
@@ -80,6 +96,49 @@ pub async fn read_event(rx: &mut RecvStream) -> Result<Option<Event>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Batching is only safe because it changes nothing on the wire. If a packed
+    /// buffer ever stopped being byte-identical to the same values sent one at a
+    /// time, the reader would desynchronise — and the symptom would be a corrupt
+    /// build log, not an obvious framing error.
+    #[test]
+    fn a_packed_batch_is_byte_identical_to_separate_frames() {
+        let events = [
+            Event::Log {
+                err: false,
+                line: "compiling".into(),
+            },
+            Event::Log {
+                err: true,
+                line: "warning: unused".into(),
+            },
+            Event::Done { code: 0, ms: 12 },
+        ];
+
+        let mut packed = Vec::new();
+        for ev in &events {
+            push_json(&mut packed, ev).unwrap();
+        }
+
+        // The same frames, laid out by hand the way `write_frame` would.
+        let mut expected = Vec::new();
+        for ev in &events {
+            let body = serde_json::to_vec(ev).unwrap();
+            expected.extend_from_slice(&(body.len() as u32).to_be_bytes());
+            expected.extend_from_slice(&body);
+        }
+        assert_eq!(packed, expected);
+
+        // And the batch reads back as the same sequence of events.
+        let mut rest = &packed[..];
+        for ev in &events {
+            let len = u32::from_be_bytes(rest[..4].try_into().unwrap()) as usize;
+            let got: Event = serde_json::from_slice(&rest[4..4 + len]).unwrap();
+            assert_eq!(format!("{got:?}"), format!("{ev:?}"));
+            rest = &rest[4 + len..];
+        }
+        assert!(rest.is_empty(), "trailing bytes after the batch");
+    }
 
     #[test]
     fn oversized_frame_is_rejected_before_allocating() {

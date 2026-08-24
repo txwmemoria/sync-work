@@ -111,6 +111,15 @@ pub enum Command {
         /// other unattended callers.
         #[arg(long)]
         if_reachable: bool,
+        /// Keep running, syncing whenever the local context changes.
+        ///
+        /// Complements the Stop hook rather than replacing it: the hook covers
+        /// "a session ended", this covers a long session you want to continue on
+        /// the other machine, and pulling what that machine writes without being
+        /// asked. Implies `--if-reachable`, since a sleeping peer is normal for
+        /// something left running.
+        #[arg(long, conflicts_with = "dry_run")]
+        watch: bool,
     },
     /// Push the current branch, then have the peer fetch and fast-forward it.
     Handoff {

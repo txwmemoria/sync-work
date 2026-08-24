@@ -150,8 +150,26 @@ pub async fn handle(
     };
 
     let drain = async {
-        while let Some(ev) = erx.recv().await {
-            transport::write_json(&mut tx, &ev).await?;
+        // Everything already queued goes out in one write rather than one write per
+        // event. A verbose build outruns the wire — `cargo build -vv` and chatty
+        // test harnesses produce output far faster than it can be framed and sent —
+        // and once the channel fills it is the *channel*, not the compiler, setting
+        // the pace. Draining in batches keeps the build the slow part.
+        //
+        // Bounded because the point is to keep up, not to accumulate: a batch is
+        // sent as soon as it is taken, so latency stays at one queue's worth and
+        // streamed output still arrives while the build runs.
+        const BATCH: usize = 256;
+        let mut batch = Vec::with_capacity(BATCH);
+        loop {
+            if erx.recv_many(&mut batch, BATCH).await == 0 {
+                break;
+            }
+            let mut out = Vec::new();
+            for ev in batch.drain(..) {
+                transport::push_json(&mut out, &ev)?;
+            }
+            tx.write_all(&out).await?;
         }
         anyhow::Ok(())
     };

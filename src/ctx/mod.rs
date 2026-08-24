@@ -23,4 +23,4 @@ pub mod server;
 pub use client::{Options, sync};
 pub use merge::{Applied, apply_incoming, plan};
 pub use roots::{Root, resolve_roots};
-pub use scan::{now_ms, read_for_send, scan};
+pub use scan::{fingerprint, now_ms, read_for_send, scan};

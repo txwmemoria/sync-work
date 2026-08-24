@@ -116,6 +116,15 @@ sw service install                  # 两台各一次，节点开机自启
 
 节点和客户端互不干扰：一台机器可以同时跑着 `sw node` 服务对端，又用 `sw verify` 请对端干活。
 
+**一台机器只允许一个节点。** 第二个 `sw node` 会被拒绝并告诉你锁在哪：
+
+```
+error: another `sw node` is already running on this machine — it holds
+       C:\Users\sdkpo\.syncwork\node.lock. Stop it with `sw service stop`, ...
+```
+
+不是洁癖 —— 两个节点共用同一个身份、都在 relay 上注册它，请求会落到抢赢的那个，另一个空转：可能跑着旧代码，也可能正握着一个 worktree。用的是操作系统文件锁而不是 pid 文件，所以进程无论怎么死锁都会被内核释放，没有残留状态要清理。真想同时跑两个独立节点，用 `SW_HOME` 给它们各自的状态目录（端到端测试就靠这个）。
+
 ## 安装
 
 两台机器都要装。需要 Rust 1.91+（iroh 的下限）和 git。
@@ -249,6 +258,12 @@ steps = ["cargo build --release --all-targets", "cargo test --all"]
 [recipes.ci.windows]        # 只在需要时覆盖平台差异
 steps = ["cargo build --release", "cargo test --all -- --test-threads=1"]
 env = { CC = "clang-cl" }
+
+[context]
+quiet_secs = 5
+
+[context.roots.claude]      # 要同步哪些 AI 状态目录，见「AI 上下文同步」
+kind = "claude-project"
 ```
 
 ```bash
@@ -316,9 +331,14 @@ error: project `myapp` is not linked on mac-mini — run `sw link` in your clone
 ```bash
 sw ctx              # 双向同步（按当前项目）
 sw ctx --dry-run    # 只看会动什么
+sw ctx --watch      # 留着不管，本地一变就同步
 ```
 
 同步完在另一台机器上 `/resume` 就能看到这台的会话，memory 也一并共享。每个项目的上下文独立，互不串台。
+
+`--watch` 和下面的 Stop hook 是互补的，不是替代：hook 管「会话结束了」这个最关键的时刻；`--watch` 管剩下的 —— 一个长会话中途想换机器接着聊，以及**把对端写的东西拉过来**而不用记得去要。
+
+它每 2 秒看一眼本地根目录（只看文件名、大小、mtime，不读内容，所以这个频率不心疼），变了就同步；另外每约 60 秒无条件同步一次，否则只盯本地就变成单向了。没有东西动的时候它一句话都不说 —— 一个挂几小时的进程要是每分钟报一次「0 pulled, 0 pushed」，真正要紧的行就全被埋了。它也不会因为对端睡了就退出（`--watch` 自带 `--if-reachable`）。
 
 ### 让它自动跑
 
@@ -335,6 +355,34 @@ sw hook uninstall
 写入的是 `.claude/settings.local.json` 而**不是** `settings.json` —— 后者会提交，那样没装 `sw` 的同事每次会话结束都会踩到一个失败的 hook。命令里带绝对 `-C <仓库>`，因为 hook 的工作目录不保证。
 
 hook 用的是 `sw ctx --if-reachable`：对端离线时静默退出 0。这个区分是刻意的 —— **不可达**是暂时状态（另一台机器睡着了），你无从下手；而**被拒绝**是配置错误，仍然会报错。
+
+### 同步哪些目录（不止 Claude）
+
+哪些目录算「上下文」是**声明**在 `syncwork.toml` 里的，不写死在代码里。因为 AI 工具不只一个，而它们唯一的共同点就是状态都在仓库之外、所以都不会走 git。
+
+```toml
+[context]
+quiet_secs = 5              # 这么久内被改过的文件跳过（可能正被活跃会话写入）
+
+[context.roots.claude]
+kind = "claude-project"     # Claude Code 的按项目目录，见下面「路径推导」
+
+[context.roots.codex]
+kind = "home"               # 相对**各自机器**的 home
+path = ".codex/sessions"
+
+[context.roots.notes]
+kind = "repo"               # 相对检出目录，用于 git 不跟踪的状态
+path = "docs/ai-notes"
+```
+
+三种 `kind` 都是**规则**而不是路径 —— 两台机器各自在本地求值，线上只传根的**名字**。这是刻意的：一台机器上的绝对路径拿到另一台毫无意义。所以 `syncwork.toml` 提交进 git，两边读同一份，不需要在每台机器上分别配一遍再想办法保持一致。
+
+`kind = "home"` 还可以加 `env = "SOME_HOME"`：那个环境变量有值时替换掉 home。`claude-project` 内部就是这么处理 `CLAUDE_CONFIG_DIR` 的。
+
+加一个新工具不需要改代码，写四行配置就行。**注意**：根必须是**目录**。有些工具把状态存在单个**文件**里（Aider 的 `.aider.chat.history.md`），指过去会有告警且同步不到东西 —— 那种情况指它所在的目录。
+
+老的 `claude = true` / `extra = [...]` 写法仍然读得懂并自动折算，不用改现有仓库。
 
 ### 路径推导
 
@@ -354,13 +402,6 @@ mtime 新的一方胜出。但在覆盖失败方之前，会**在本地**比较�
 写入时会把发送方的 mtime 一起带过去。少了这一步，刚写入的副本看起来更新，下次同步会把它推回去，来回弹跳永不收敛。
 
 `quiet_secs`（默认 5 秒）内被改过的文件会跳过 —— 大概率正在被一个活跃会话追加写入。
-
-```toml
-[context]
-claude = true       # 同步 Claude Code 会话与 memory
-extra = []          # 额外的仓库相对目录（git 不跟踪的状态）
-quiet_secs = 5
-```
 
 **注意**：同一时刻只在一台机器上开同一个项目的会话。两边同时写必然分叉，工具会保住两份并告警，但那需要你手工处理。
 
@@ -419,7 +460,10 @@ src/
 ├── cli.rs            命令行定义（只有定义，没有实现）
 ├── commands/         本地事务性命令
 │   ├── pair.rs       机器配对
-│   └── project.rs    init / link / unlink / projects
+│   ├── project.rs    init / link / unlink / projects
+│   ├── hook.rs       Claude Code Stop hook 的装卸
+│   ├── doctor.rs     一次查清所有可能出问题的地方
+│   └── reset.rs      恢复出厂设置
 ├── config/           两层配置
 │   ├── platform.rs   宿主平台（不是配置，是关于宿主的事实）
 │   ├── repo.rs       syncwork.toml：项目名、配方
@@ -435,7 +479,7 @@ src/
 │   ├── server.rs     节点方
 │   └── exec.rs       配方执行（只有 server 用它）
 ├── ctx/              AI 上下文同步
-│   ├── roots.rs      路径推导
+│   ├── roots.rs      根的声明求值（每台机器各自解析）
 │   ├── scan.rs       扫描成 manifest、路径校验
 │   ├── merge.rs      合并策略（前缀检测、冲突保留）
 │   ├── client.rs     发起方
@@ -454,8 +498,8 @@ src/
 ## 测试
 
 ```bash
-cargo test          # 51 个单元测试
-bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，24 项检查
+cargo test          # 55 个单元测试
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，27 项检查
 ```
 
 端到端覆盖单元测试到不了的部分：机器级配对、项目注册表、QUIC 传输、patch 传递、worktree 隔离、诊断回传、退出码透传、上下文同步。其中两项专门锁住本工具的核心主张 —— **两个项目共用一个节点和一次配对**，以及**对端未 link 时给出可操作的错误**。
@@ -531,14 +575,13 @@ peers
 ## 已知边界
 
 - **`sw ctx` 要求同一个会话文件同一时刻只被一台机器追加。** 不同会话（各机器上新建的）互不干扰，它们是不同文件。危险的是在两台机器上 `/resume` **同一个**会话并各自往下写 —— 那必然分叉。工具会保住两份并告警（`.conflict-<host>-<戳>`，不丢数据），但需要你手工合并。
-- **日志按行发帧**，几万行输出的构建会产生对应数量的 QUIC 帧。能用，但没有批量化。
 - **Windows 上没有 keep-alive。** `Run` 键只在登录时启动一次；节点若崩溃，要到下次登录才会回来（macOS 的 launchd 有 `KeepAlive`，Linux 的 systemd 有 `Restart=always`）。这是不需要管理员权限的代价。
-- **同一身份的两个节点不会被阻止。** 手动 `sw node` 和服务同时跑起来，两者会抢同一个 endpoint。用 `sw service status` 和进程列表确认只有一个。
+- **只有关系的两端都活着，缓存地址才有意义。** 两台机器都换了网络、且公共查询仍然不给答案的话，双方缓存的 relay 都过期了，只能等 n0 的 DNS 恢复，或者重新配对一次。
+- **拨号仍然依赖 relay 可达。** 缓存地址解决的是「查不到 key」，不是「连不上」。两台机器在同一个内网、但公网整体不通时，靠的是 iroh 的局域网发现，不是这个缓存。
 - **沙箱化终端可能读到不同的配置。** 见排查一节 —— 配对要在你日常使用的那个 shell 里做。
 
 ## 路线
 
 - `sw tui` — ratatui 面板，机器状态、项目列表与构建历史
-- `sw ctx --watch` — 会话结束时自动同步，而不是手动触发
-- 日志分帧批量化
 - 超过两台机器时的扇出验证（`sw verify --all`）
+- Windows 上的 keep-alive（不用管理员权限的前提下）
