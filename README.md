@@ -100,7 +100,7 @@ cd ~/projects/myapp
 sw init             # 生成 syncwork.toml，把 .sw/ 加进 .gitignore
 # 按需改配方（见「syncwork.toml 参考」），提交
 
-# 机器 B，在同一项目的检出里
+# 机器 B，在同一项目的本地克隆里
 cd ~/code/myapp && git pull
 sw link             # 把「项目名 → 本机路径」记进本机注册表
 ```
@@ -109,7 +109,7 @@ sw link             # 把「项目名 → 本机路径」记进本机注册表
 
 **再接第二个项目？在那个仓库里把这一步重做一遍，就完了。** 配对和节点都是机器级的：一个节点服务所有项目，`syncwork.toml` 每个仓库各有一份，互不相干。
 
-想让 AI 上下文自动同步，两台机器的检出里再各跑一次 `sw hook install`。最后两边各跑一次 `sw doctor`，应为 `all checks passed`。
+想让 AI 上下文自动同步，在两台机器的项目目录里再各跑一次 `sw hook install`。最后两边各跑一次 `sw doctor`，应为 `all checks passed`。
 
 ```bash
 sw projects         # 本机注册了哪些项目
@@ -136,7 +136,7 @@ sw handoff --no-push    # 已经推过了，只让对端 fetch
 sw verify && sw handoff # 验证通过才交接
 ```
 
-**对端绝不猜。** 它总是 fetch，但只在四个条件全满足时才动检出：请求的分支正是它检出的那个、工作区干净、远端 ref 存在、且是严格快进。任何其他情况都只 fetch 并说明原因：
+**对端绝不猜。** 它总是 fetch，但只在四个条件全满足时才移动本地分支：请求的分支正是它当前所在的分支、工作区干净、远端 ref 存在、且是严格快进。任何其他情况都只 fetch 并说明原因：
 
 ```
   ok mac-mini fetched master at 938ce0e
@@ -222,7 +222,7 @@ kind = "home"               # 相对各自机器的 home
 path = ".codex/sessions"    # 可加 env = "SOME_HOME" 覆盖 home
 
 [context.roots.notes]
-kind = "repo"               # 相对检出目录，放 git 不跟踪的状态
+kind = "repo"               # 相对仓库目录，放 git 不跟踪的状态
 path = "docs/ai-notes"
 ```
 
@@ -290,7 +290,7 @@ relay 身兼两职。一是**牵线**：两台机器都主动向外连到公网 
 
 ### 路径推导（ctx）
 
-Claude Code 用项目的绝对路径给状态目录起名，`[A-Za-z0-9-]` 之外的字符一律换成 `-`（`D:\projects\sync-work` → `D--projects-sync-work`）。两台机器算出来的目录名必然不同 —— 所以各自用自己的检出路径推导自己的目录名，网络上只传根的名字和相对路径。
+Claude Code 用项目的绝对路径给状态目录起名，`[A-Za-z0-9-]` 之外的字符一律换成 `-`（`D:\projects\sync-work` → `D--projects-sync-work`）。两台机器算出来的目录名必然不同 —— 所以各自用本地仓库的路径推导自己的目录名，网络上只传根的名字和相对路径。
 
 ## 排查
 
