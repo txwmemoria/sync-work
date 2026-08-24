@@ -228,6 +228,8 @@ path = "docs/ai-notes"
 
 三种 `kind` 都是**规则**而不是路径 —— 各台机器按规则找到自己的目录，网络上只传根的名字（一台机器的绝对路径，拿到另一台上毫无意义）。接入新 AI 工具就是四行配置。根必须是**目录**，指向单个文件（如 Aider 的 `.aider.chat.history.md`）会告警且同步不到，指它所在的目录即可。旧的 `claude = true` / `extra` 写法仍然认识。
 
+配方数量和名字都随意（`sw verify <名字>` 按名调用），每个 step 交给真实 shell 执行（Windows 是 PowerShell，macOS/Linux 是 `/bin/sh`），管道、重定向、调用仓库里的脚本文件都可以 —— 工具不限于 Rust，node / python / make 项目一样用。两个细节：**对端执行的命令来自它自己那份 `syncwork.toml`**（发起方只能点名配方，patch 注入不了命令），所以改配方要提交并让对端拉取后才跨机生效；而**脚本文件的内容跟着 patch 走**（worktree 就是你当前的工作区），把复杂逻辑放进脚本、配方只写一行调用，就能未提交也即时生效。
+
 配方里的 cargo 命令自动注入 `--message-format=json-diagnostic-rendered-ansi`，失败以带 `file:line` 的结构化诊断回传，非 cargo 输出当普通日志透传；不想要就设 `cargo_json = false`。
 
 ## 环境变量
