@@ -73,12 +73,13 @@ fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 fn local_timer()
 -> Option<tracing_subscriber::fmt::time::OffsetTime<impl time::formatting::Formattable>> {
     let offset = time::UtcOffset::current_local_offset().ok()?;
+    // Also handed to `style`, whose stamped output lines (`sw ctx --watch`) must
+    // read exactly like the log. The format itself lives there — one definition,
+    // so the two cannot drift.
+    style::set_local_offset(offset);
     Some(tracing_subscriber::fmt::time::OffsetTime::new(
         offset,
-        time::macros::format_description!(
-            "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3][offset_hour \
-             sign:mandatory]:[offset_minute]"
-        ),
+        style::TIME_FORMAT,
     ))
 }
 

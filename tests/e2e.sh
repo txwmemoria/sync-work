@@ -403,6 +403,13 @@ kill $WATCH_PID 2>/dev/null; wait $WATCH_PID 2>/dev/null
 # And it must stay quiet while nothing is happening, or an hours-long watch buries
 # the lines that matter under one report per minute.
 grep -q "in sync" "$LAB/w.err" && { cat "$LAB/w.err"; fail "watch narrates idle polls"; }
-echo "PASS watch synced a change and stayed quiet otherwise"
+# Watch lines are stamped in the log's exact format — they arrive over hours, so
+# *when* is part of the information, and matching the node log lets the two be
+# read side by side. One-shot output must NOT have grown stamps (checked against
+# the ctx runs captured earlier).
+grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:[0-9]{2} ' \
+  "$LAB/w.err" || { head -3 "$LAB/w.err"; fail "watch lines carry no log-format timestamp"; }
+grep -qE '^[0-9]{4}-' "$LAB/c1.err" && { head -3 "$LAB/c1.err"; fail "one-shot ctx output grew timestamps"; }
+echo "PASS watch synced a change, stamped like the log, quiet otherwise"
 
 step "ALL CHECKS PASSED"

@@ -9,6 +9,18 @@ use anyhow::{Result, bail};
 use iroh::endpoint::Connection;
 use std::path::Path;
 
+/// Every progress line goes through this instead of `eprintln!`.
+///
+/// The prefix is empty for a one-shot run and a log-format timestamp under
+/// `--watch` — lines that arrive hours apart carry *when* as part of the
+/// information, and matching the log's format means a watch line and a node-log
+/// line about the same sync can be read side by side.
+macro_rules! say {
+    ($($arg:tt)*) => {
+        eprintln!("{}{}", crate::style::stamp(), format_args!($($arg)*))
+    };
+}
+
 pub struct Options {
     pub peer: Option<String>,
     pub dry_run: bool,
@@ -108,7 +120,10 @@ async fn watch(
     roots: &[Root],
     opts: &Options,
 ) -> Result<i32> {
-    eprintln!(
+    // From here on every line is stamped: watch output arrives over hours, and a
+    // pull line without a time answers only half the question it raises.
+    crate::style::set_stamped(true);
+    say!(
         "{} {peer_name}, {} root{} — syncing on change, ctrl-c to stop",
         "watch".bold(),
         roots.len(),
@@ -128,7 +143,7 @@ async fn watch(
             // Reported and swallowed: see above. `if_reachable` already keeps a
             // sleeping peer quiet, so anything that reaches here is worth a line.
             if let Err(e) = sync_with(ep, cfg, peer, peer_name, roots, opts).await {
-                eprintln!("{} {e:#}", "watch".yellow().bold());
+                say!("{} {e:#}", "watch".yellow().bold());
             }
         } else {
             polls_since_sync += 1;
@@ -136,7 +151,7 @@ async fn watch(
 
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {
-                eprintln!("{} stopped", "watch".dimmed());
+                say!("{} stopped", "watch".dimmed());
                 return Ok(0);
             }
             _ = tokio::time::sleep(POLL) => {}
@@ -156,7 +171,7 @@ async fn sync_with(
         Ok(c) => c,
         Err(e) if opts.if_reachable => {
             if opts.chatty() {
-                eprintln!("{} {peer_name} is not reachable, skipping", "ctx".dimmed());
+                say!("{} {peer_name} is not reachable, skipping", "ctx".dimmed());
             }
             tracing::debug!("skipped context sync: {e:#}");
             return Ok(0);
@@ -183,7 +198,7 @@ async fn exchange(
     let project = &cfg.project.name;
     let (remote_host, remote_roots) = fetch_manifests(conn, project).await?;
     if opts.chatty() {
-        eprintln!("{} {peer_name} ({remote_host})", "ctx".bold());
+        say!("{} {peer_name} ({remote_host})", "ctx".bold());
     }
 
     let quiet_ms = cfg.context.quiet_secs.saturating_mul(1000);
@@ -193,7 +208,7 @@ async fn exchange(
     for root in roots {
         let local = ctx::scan(root)?;
         let Some(remote) = remote_roots.iter().find(|r| r.key == root.key) else {
-            eprintln!(
+            say!(
                 "  {} {} — peer does not have this root configured",
                 "skip".yellow(),
                 root.key
@@ -211,10 +226,10 @@ async fn exchange(
         let label = root.key.cyan().to_string();
         if plan.is_empty() && plan.skipped.is_empty() {
             if opts.chatty() {
-                eprintln!("  {label} in sync ({} files)", plan.identical);
+                say!("  {label} in sync ({} files)", plan.identical);
             }
         } else {
-            eprintln!(
+            say!(
                 "  {label}  {} to pull, {} to push, {} identical",
                 plan.pull.len(),
                 plan.push.len(),
@@ -222,15 +237,15 @@ async fn exchange(
             );
         }
         for (p, why) in &plan.skipped {
-            eprintln!("    {} {p} ({why})", "skip".yellow());
+            say!("    {} {p} ({why})", "skip".yellow());
         }
 
         if opts.dry_run {
             for p in &plan.pull {
-                eprintln!("    {} {p}", "pull".green());
+                say!("    {} {p}", "pull".green());
             }
             for p in &plan.push {
-                eprintln!("    {} {p}", "push".blue());
+                say!("    {} {p}", "push".blue());
             }
             continue;
         }
@@ -244,7 +259,7 @@ async fn exchange(
     }
 
     if opts.dry_run {
-        eprintln!("{} nothing written", "dry-run".dimmed());
+        say!("{} nothing written", "dry-run".dimmed());
         return Ok(0);
     }
 
@@ -263,10 +278,10 @@ async fn exchange(
     if totals.skipped > 0 {
         parts.push(format!("{} skipped", totals.skipped));
     }
-    eprintln!("{} {}", "  ok".green().bold(), parts.join(", "));
+    say!("{} {}", "  ok".green().bold(), parts.join(", "));
 
     if totals.conflicts > 0 {
-        eprintln!(
+        say!(
             "{} {} file{} diverged; the local version was preserved \
              as *.conflict-<host>-<stamp>",
             "note".yellow().bold(),
@@ -352,7 +367,7 @@ async fn push(
             Ok(v) => v,
             // A session file can vanish between the scan and the send.
             Err(e) => {
-                eprintln!("    {} {p} ({e})", "skip".yellow());
+                say!("    {} {p} ({e})", "skip".yellow());
                 continue;
             }
         };
@@ -366,7 +381,7 @@ async fn push(
         .await?;
         transport::write_frame(&mut tx, &bytes).await?;
         totals.pushed += 1;
-        eprintln!("    {} {p}", "push".blue());
+        say!("    {} {p}", "push".blue());
     }
     transport::write_json(&mut tx, &CtxFrame::End).await?;
     tx.finish().ok();
@@ -382,7 +397,7 @@ fn report(path: &str, applied: &Applied, totals: &mut Totals, verb: &str) {
     match applied {
         Applied::Conflict(backup) => {
             totals.conflicts += 1;
-            eprintln!(
+            say!(
                 "    {} {path} (diverged; kept local copy as {})",
                 "conflict".red().bold(),
                 backup.file_name().unwrap_or_default().to_string_lossy()
@@ -390,8 +405,8 @@ fn report(path: &str, applied: &Applied, totals: &mut Totals, verb: &str) {
         }
         Applied::Extended => {
             totals.extended += 1;
-            eprintln!("    {} {path} {}", verb.green(), "(appended)".dimmed());
+            say!("    {} {path} {}", verb.green(), "(appended)".dimmed());
         }
-        _ => eprintln!("    {} {path}", verb.green()),
+        _ => say!("    {} {path}", verb.green()),
     }
 }
