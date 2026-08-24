@@ -40,9 +40,9 @@ pub async fn run(repo: &Path, opts: Options) -> Result<i32> {
         let conn = transport::connect(&ep, &peer).await?;
         let exchange = async {
             let (mut tx, mut rx) = transport::open_request(&conn).await?;
-            transport::write_json(
+            transport::write_request(
                 &mut tx,
-                &Request::Handoff {
+                Request::Handoff {
                     protocol: PROTOCOL_VERSION,
                     project,
                     branch: branch.clone(),

@@ -165,6 +165,21 @@ pub struct Peer {
     /// iroh `EndpointId` — a public key.
     pub id: String,
     pub platform: Platform,
+    /// Where this peer last told us it can be reached: its own home relay.
+    ///
+    /// A key alone is only dialable if some public directory will translate it
+    /// into an address, and that is not a safe assumption. Measured: n0's
+    /// authoritative DNS served this machine's record while returning
+    /// `Non-existent domain` for the peer's — even though the peer's record was
+    /// present and current in the very same service's pkarr store. Half the pair
+    /// was undialable for a service outage neither machine could see or fix.
+    ///
+    /// So a peer states its address whenever it sends a request, and it is kept
+    /// here. Discovery still runs alongside this — iroh treats a supplied address
+    /// as one more candidate path, not as a replacement — so a stale entry costs
+    /// a failed probe rather than a failed command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 /// Where a project lives on this machine.
@@ -178,6 +193,12 @@ pub struct NodeInfo {
     /// Human-readable name other machines see. Defaults to the hostname.
     #[serde(default)]
     pub name: Option<String>,
+    /// This machine's own relay, put on every outgoing request so peers can dial
+    /// back without depending on a public directory. Written by whichever process
+    /// discovers it — usually the node, which is the only one that reliably knows
+    /// it in time. See [`Peer::relay`] for why any of this is needed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -243,6 +264,53 @@ impl Machine {
                 bail!("multiple peers ({}); pass --peer <name>", names.join(", "))
             }
         }
+    }
+
+    /// Remember where a peer said it can be reached. True when it changed.
+    ///
+    /// Keyed by public key rather than by name: the name is local bookkeeping and
+    /// either side may have renamed its own machine, while the key is the thing
+    /// both agree on.
+    pub fn remember_relay(&mut self, peer_id: &str, relay: &str) -> bool {
+        match self.peers.values_mut().find(|p| p.id == peer_id) {
+            Some(peer) if peer.relay.as_deref() == Some(relay) => false,
+            Some(peer) => {
+                peer.relay = Some(relay.to_string());
+                true
+            }
+            // An unpaired key never reaches this point — the connection is refused
+            // first — but recording an address for a machine we do not trust would
+            // be wrong regardless of how it got here.
+            None => false,
+        }
+    }
+
+    /// Persist a peer's address, reading and writing the file around the change.
+    ///
+    /// Load-modify-save rather than mutating a held snapshot, because the caller
+    /// is the node serving a request and its snapshot is per-request anyway. The
+    /// write only happens when the address actually changed, which makes the
+    /// theoretical race with a concurrent `sw link` both rare and self-correcting:
+    /// the next request writes the same value again.
+    pub fn record_relay(peer_id: &str, relay: &str) -> Result<bool> {
+        let mut machine = Self::load()?;
+        if !machine.remember_relay(peer_id, relay) {
+            return Ok(false);
+        }
+        machine.save()?;
+        Ok(true)
+    }
+
+    /// Persist this machine's own address, so short-lived commands can state it
+    /// without each having to discover it first. True when it changed.
+    pub fn record_self_relay(relay: &str) -> Result<bool> {
+        let mut machine = Self::load()?;
+        if machine.node.relay.as_deref() == Some(relay) {
+            return Ok(false);
+        }
+        machine.node.relay = Some(relay.to_string());
+        machine.save()?;
+        Ok(true)
     }
 
     /// Resolve a project name to a checkout on this machine, for a peer's request.
@@ -321,7 +389,27 @@ mod tests {
         Peer {
             id: id.into(),
             platform: Platform::Macos,
+            relay: None,
         }
+    }
+
+    #[test]
+    fn a_peers_address_is_remembered_by_key_and_rewritten_only_when_it_changes() {
+        let mut m = Machine::default();
+        m.peers.insert("mac".into(), peer("aaa"));
+
+        assert!(m.remember_relay("aaa", "https://r1/"), "first address");
+        assert_eq!(m.peers["mac"].relay.as_deref(), Some("https://r1/"));
+
+        // Saving on every request would rewrite the file hundreds of times a day
+        // for a value that almost never moves.
+        assert!(!m.remember_relay("aaa", "https://r1/"), "unchanged");
+        assert!(m.remember_relay("aaa", "https://r2/"), "moved relay");
+        assert_eq!(m.peers["mac"].relay.as_deref(), Some("https://r2/"));
+
+        // A key we have never paired with gets no entry, however it arrived.
+        assert!(!m.remember_relay("zzz", "https://r1/"));
+        assert_eq!(m.peers.len(), 1);
     }
 
     #[test]

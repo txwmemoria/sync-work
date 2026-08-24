@@ -151,7 +151,7 @@ async fn attempt(
         from_host: Machine::load().map(|m| m.node_name()).unwrap_or_default(),
         color: crate::style::enabled(),
     });
-    transport::write_json(&mut tx, &req).await?;
+    transport::write_request(&mut tx, req).await?;
     transport::write_frame(&mut tx, &snap.patch).await?;
     tx.finish().ok();
 

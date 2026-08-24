@@ -206,7 +206,9 @@ sw service logs -f           # 跟踪节点日志（平台差异由它处理）
 sw service uninstall
 ```
 
-`sw service logs` 省掉了记三个不同答案的麻烦：macOS 是 `~/Library/Logs/` 下的文件，Windows 是 `%LOCALAPPDATA%\syncwork\` 下的文件，Linux 根本不是文件而是 systemd journal。`-f` 跟踪，`-n` 指定回看行数。
+`sw service logs` 省掉了记三个不同答案的麻烦：macOS 是 `~/Library/Logs/` 下的文件，Windows 是 `%LOCALAPPDATA%\syncwork\` 下的文件，Linux 根本不是文件而是 systemd journal。`-f` 跟踪，`-n` 指定回看行数。`--path` 只打印位置，不打开跟踪（脚本里想避免占住文件句柄时用）。
+
+Windows 上节点自己写日志文件（`sw node --log <path>`），而不是让 PowerShell 重定向。两个原因：PowerShell 的 `*>` 写的是 UTF-16 并把 stderr 每行包成 `NativeCommandError`，日志既不可读也 grep 不到；更要紧的是**被重定向的子进程会继承父进程的句柄**，于是节点会一直握着调用方的管道不放 —— 任何读 `sw service start` 输出的脚本都会永久卡住。节点自己开文件就同时解决了这两件事，而且是追加而非截断，重启后上一轮的日志还在。
 
 **更新完一定要 `sw service restart`。** `install` 不等于重启：它只保证「下次登录会启动新二进制」，不会替换当前正在跑的那个进程。
 
@@ -389,6 +391,12 @@ quiet_secs = 5
 
 **授权就是对等表。** iroh 连接天生经过公钥认证（remote id 就是完成 QUIC 握手的那把公钥），所以「id 在本机对等表里」就是充分的鉴权。没有 token 需要轮转或泄漏。未配对的连接直接关闭，不回复任何信息。
 
+**地址自己记，不靠公共目录。** 只有公钥的话，拨号就依赖某个公共服务愿意把 key 翻译成地址。这个假设不成立 —— 实测遇到过：n0 的权威 DNS 对一台机器正常返回，对同一对里的另一台返回 `Non-existent domain`，而那条记录在同一个服务自己的 pkarr 存储里明明存在且是新的。结果一半方向拨不通，两台机器都看不出原因。
+
+所以每个请求都带上**发送方自己的** relay 地址，接收方记进对等表（`sw doctor` 会显示 `address`）。通过一次之后，这对机器就再不需要那个查询了。拨号时缓存地址和公共查询**同时**进行 —— iroh 把给定地址当作一条候选路径而非替代品 —— 所以地址过期只是浪费一次探测，不会让命令失败。
+
+地址由**节点**记录（它启动时等到 online 才写），短命令从配置里读。因为一个 `sw ctx` 往往在自己的 endpoint 找到 relay 之前就跑完了 —— 实测 relay 上线约需 3 秒。
+
 **路径不过网络。** 请求里只有项目名。对端在自己的注册表里查自己的路径，还会核对那个检出的 `syncwork.toml` 里的项目名是否匹配，防止注册表过期指向别的项目。peer 提供的相对路径在落盘前逐段校验，不能逃出根目录。
 
 **base commit 缺失时自动回退。** 如果对端没有你的 HEAD（本地独有的 commit），它会先 `git fetch`；仍然没有就回报，客户端自动改用与远端的 merge-base 重新快照并加宽 patch。所以本地独有 commit 也不需要 push。
@@ -446,8 +454,8 @@ src/
 ## 测试
 
 ```bash
-cargo test          # 35 个单元测试
-bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，18 项检查
+cargo test          # 51 个单元测试
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，24 项检查
 ```
 
 端到端覆盖单元测试到不了的部分：机器级配对、项目注册表、QUIC 传输、patch 传递、worktree 隔离、诊断回传、退出码透传、上下文同步。其中两项专门锁住本工具的核心主张 —— **两个项目共用一个节点和一次配对**，以及**对端未 link 时给出可操作的错误**。
@@ -476,14 +484,16 @@ sw reset --yes    # 跳过确认
 ```
 this machine
   ✓ identity    58c1190746e246c3…
-  ✓ state       C:\Users\sdkpo\AppData\Roaming\syncwork\config
+  ✓ state       C:\Users\sdkpo\.syncwork
   ✓ build       b9f24fc
+  ✓ address     https://aps1-1.relay.n0.iroh.link./
   ✗ node        not running — start it with `sw service start`
   ✓ autostart   registered
 
 peers
   ✓ niugms-macbook-pro-local  reachable
       *direct 10.209.21.106:56274 5ms, relay ... 172ms
+  ✓ address     https://aps1-1.relay.n0.iroh.link./ (cached)
   ✓ keys        agree (the peer accepted this machine's key)
   ! build       peer 80998d1, here b9f24fc
       if you just updated, the peer's node is still on old code: `sw service restart` there
@@ -493,7 +503,11 @@ peers
 
 **`the peer refused us as unpaired`** —— 对端连上了但不认识你的公钥。它记录的是一个过期的 key，通常因为本机身份被重新生成过。两边各跑 `sw pair list` 对比：你的 `id` 和对端 peers 表里记的应该一致。不一致就重新配对。
 
-**`could not reach peer ...; is 'sw node' running there?`** —— 对端节点没在跑，或者网络不通。先确认对端有 `sw node`；确认了还不通就 `SW_LOG=debug sw status` 看握手细节。
+**`no address for peer ...`** —— 本机没有它的缓存地址，公共查询（n0 的 DNS）也没给出答案。**这不是配置错误，重新配对也没用。** 缓存地址是在对端**向本机发过请求**时记下的，所以在那台机器上跑一次 `sw doctor` 就够了，然后这个方向就通了。如果一直不通，那台机器的节点大概没在跑。
+
+**`could not reach peer ...; is 'sw node' running there?`** —— 有地址但连不上：对端节点没在跑，或者网络不通。先确认对端有 `sw node`；确认了还不通就 `SW_LOG=debug sw status` 看握手细节。
+
+**`address none cached`（对端条目下）** —— 目前只能靠公共查询找到那台机器。等它向本机发一次请求就会自动记上。两边都在跑节点、且都用过一次的话，这一项就会一直是绿的。
 
 **两个 shell 报告不同的 `id`** —— `sw pair list` 会打印它实际使用的 state 目录，先对比这个。某些沙箱化的终端（如 Windows 应用容器）会重定向 `%APPDATA%`，导致同一台机器上不同 shell 读到不同的配置。**配对要在你日常使用的那个 shell 里做**，否则 ticket 里带的是另一份身份。
 

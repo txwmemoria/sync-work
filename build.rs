@@ -36,8 +36,12 @@ fn main() {
     };
     println!("cargo:rustc-env=SW_BUILD={stamp}");
 
-    // HEAD covers commits and branch switches; index covers staging a change,
-    // which is what flips the dirty flag most often.
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/index");
+    // No `rerun-if-changed` on purpose. Naming `.git/HEAD` and `.git/index` looks
+    // more precise but is wrong: editing a tracked file without staging it changes
+    // neither, so the stamp kept its old value and omitted `-dirty` — a binary full
+    // of uncommitted changes reporting itself as a clean commit, which is exactly
+    // the lie `sw doctor`'s build comparison exists to catch. With no directives at
+    // all, cargo re-runs this whenever anything in the package changes, which is
+    // the condition the stamp actually describes. The cost is two git commands per
+    // rebuild.
 }

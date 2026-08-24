@@ -41,6 +41,19 @@ pub async fn write_json<T: Serialize>(tx: &mut SendStream, value: &T) -> Result<
     write_frame(tx, &serde_json::to_vec(value)?).await
 }
 
+/// Write the first frame of a request stream: the request, and where we live.
+///
+/// Every request goes through here rather than through [`write_json`] directly, so
+/// that a peer only has to be reachable once for the reverse direction to keep
+/// working — see [`Envelope`](super::Envelope).
+pub async fn write_request(tx: &mut SendStream, request: super::Request) -> Result<()> {
+    let envelope = super::Envelope {
+        relay: super::endpoint::self_relay(),
+        request,
+    };
+    write_json(tx, &envelope).await
+}
+
 pub async fn read_json<T: for<'de> Deserialize<'de>>(rx: &mut RecvStream) -> Result<T> {
     let raw = read_frame(rx).await?;
     Ok(serde_json::from_slice(&raw)?)

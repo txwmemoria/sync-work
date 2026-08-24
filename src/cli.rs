@@ -73,7 +73,18 @@ pub enum Command {
         peer: Option<String>,
     },
     /// Run the resident node. One per machine; serves every linked project.
-    Node,
+    Node {
+        /// Append the node's log to this file instead of writing to stderr.
+        ///
+        /// The node owns its log rather than having a shell redirect it, because
+        /// on Windows there is no way to do both of "redirect the output" and
+        /// "do not inherit the launching process's handles" — and inheriting them
+        /// means any caller reading `sw service start`'s output waits forever on a
+        /// pipe the node holds for life. Redirection through PowerShell also wrote
+        /// UTF-16 and wrapped every stderr line in an error record.
+        #[arg(long, value_name = "PATH")]
+        log: Option<std::path::PathBuf>,
+    },
     /// Build the current working tree on the peer and report the result here.
     Verify {
         /// Recipe from syncwork.toml.

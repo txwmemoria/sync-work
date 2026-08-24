@@ -173,9 +173,9 @@ async fn exchange(
 
 async fn fetch_manifests(conn: &Connection, project: &str) -> Result<(String, Vec<CtxRoot>)> {
     let (mut tx, mut rx) = transport::open_request(conn).await?;
-    transport::write_json(
+    transport::write_request(
         &mut tx,
-        &Request::CtxManifest {
+        Request::CtxManifest {
             protocol: PROTOCOL_VERSION,
             project: project.to_string(),
         },
@@ -198,9 +198,9 @@ async fn pull(
     totals: &mut Totals,
 ) -> Result<()> {
     let (mut tx, mut rx) = transport::open_request(conn).await?;
-    transport::write_json(
+    transport::write_request(
         &mut tx,
-        &Request::CtxFetch {
+        Request::CtxFetch {
             project: project.to_string(),
             root: root.key.clone(),
             paths: paths.to_vec(),
@@ -232,9 +232,9 @@ async fn push(
     totals: &mut Totals,
 ) -> Result<()> {
     let (mut tx, mut rx) = transport::open_request(conn).await?;
-    transport::write_json(
+    transport::write_request(
         &mut tx,
-        &Request::CtxPush {
+        Request::CtxPush {
             project: project.to_string(),
             root: root.key.clone(),
         },

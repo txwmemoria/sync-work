@@ -17,7 +17,9 @@ use anyhow::Result;
 pub async fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         // ---------------------------------------------- machine-scoped
-        Command::Node => {
+        // The path itself was consumed in `main`, which had to build the log
+        // writer before anything could be logged.
+        Command::Node { log: _ } => {
             node::serve().await?;
             Ok(0)
         }

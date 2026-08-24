@@ -161,6 +161,25 @@ grep -q -- "-> exit 0" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "no
 grep -q "served via" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log does not report the path it served over"; }
 echo "PASS node log shows request and outcome"
 
+step "the node records where the requester can be reached"
+# A key is only dialable while some public directory is willing to translate it
+# into an address, and that is not a safe assumption: n0's DNS was observed
+# answering for one machine of a pair and returning NXDOMAIN for the other, whose
+# record was present and current in the same service's own store. Half the pair
+# went undialable for an outage neither machine could see. So each request states
+# where its sender lives, and the receiver keeps it.
+#
+# B runs the node, so it is B's table that must have learned about A. A runs no
+# node here, which exercises the slower path: a client discovering its own address
+# during its first dial and writing it down for the commands that follow.
+grep -q '^relay = ' "$LAB/hA/config.toml" \
+  || { cat "$LAB/hA/config.toml"; fail "A never recorded its own address"; }
+grep -A3 '^\[peers' "$LAB/hB/config.toml" | grep -q '^relay = ' \
+  || { cat "$LAB/hB/config.toml"; fail "the node did not record where A can be reached"; }
+grep -q "reachable at" "$LAB/node.log" \
+  || { tail -20 "$LAB/node.log"; fail "address recorded but never logged"; }
+echo "PASS both machines recorded where the other can be reached"
+
 step "UNCOMMITTED compile error should fail with a located diagnostic"
 cat > "A/widget/src/lib.rs" <<'EOF'
 pub fn add(a: i32, b: i32) -> i32 { a + b }

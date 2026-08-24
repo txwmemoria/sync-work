@@ -241,12 +241,39 @@ const WIN_RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 /// needs quotes around two paths, and nesting those inside a `reg add /d`
 /// argument is a quoting hazard for no benefit. The registry value then only has
 /// to quote one plain path.
+/// The node is handed to `Start-Process` with no stream redirection, and told to
+/// write its own log with `--log`.
+///
+/// Both halves of that are forced, and the reason is one Windows rule: a process
+/// created for redirection inherits handles. `CreateProcess` with
+/// `bInheritHandles = TRUE` — which is what redirection requires, in Rust and in
+/// .NET alike — inherits *every* inheritable handle, not only the streams it was
+/// told to replace. So a node started while this process's stdout was a pipe held
+/// that pipe open for its entire life, and any caller reading our output
+/// (`sw service start | tail`, a shell substitution, a CI step) waited forever for
+/// an EOF that would never come. Nulling the child's own streams does not help;
+/// the leak is the inheritance, not the assignment. `Start-Process` without any
+/// `-Redirect*` argument goes through `ShellExecuteEx`, which does not inherit,
+/// and this script then exits, so the pipe closes on time.
+///
+/// Having the node open its own file also fixes what the log contained. PowerShell's
+/// `*>` wrote UTF-16 and wrapped everything the node sent to stderr in
+/// `NativeCommandError` records, so `sw service logs` produced spaced-out mojibake
+/// with PowerShell diagnostics spliced through the node's startup banner, and
+/// `grep` matched nothing.
 pub fn windows_launcher_script(exe: &Path, log: &Path) -> String {
+    // Doubled single quotes are how a single-quoted PowerShell string escapes a
+    // quote, which keeps this free of double quotes entirely.
     let q = |p: &Path| p.display().to_string().replace('\'', "''");
     format!(
-        "# Written by `sw service install`. Starts the resident node at logon.\n& '{}' node *> '{}'\n",
-        q(exe),
-        q(log)
+        "# Written by `sw service install`. Starts the resident node at logon.\n\
+         # No redirection here on purpose: a redirected child inherits this\n\
+         # process's handles, so the node writes its own log. See\n\
+         # windows_launcher_script for the whole story.\n\
+         Start-Process -FilePath '{exe}' -ArgumentList 'node','--log','{log}' \
+         -WindowStyle Hidden\n",
+        exe = q(exe),
+        log = q(log),
     )
 }
 
@@ -815,13 +842,25 @@ mod tests {
             Path::new(r"C:\tools\sw.exe"),
             Path::new(r"C:\Users\me\AppData\Local\syncwork\a.log"),
         );
-        assert!(s.contains(r"& 'C:\tools\sw.exe' node"), "got {s}");
-        // `*>` rather than `>`: stderr carries the node's log, so a plain stdout
-        // redirect would capture nothing useful.
+        assert!(s.contains(r"-FilePath 'C:\tools\sw.exe'"), "got {s}");
+        // Start-Process, never a direct call: a foreground node inherits this
+        // process's handles and holds any pipe among them open for its whole life,
+        // which is what made `sw service start | tail` hang forever.
         assert!(
-            s.contains(r"*> 'C:\Users\me\AppData\Local\syncwork\a.log'"),
+            !s.contains("& '"),
+            "the node must not be run in the foreground: {s}"
+        );
+        // The node writes its own log. Any `-Redirect*` here would put us back on
+        // the inheriting code path, and `*>` would write UTF-16.
+        assert!(
+            s.contains(r"'node','--log','C:\Users\me\AppData\Local\syncwork\a.log'"),
             "got {s}"
         );
+        assert!(
+            !s.contains("-Redirect"),
+            "redirection re-inherits handles: {s}"
+        );
+        assert!(!s.contains("*>"), "got {s}");
         // No `-C <repo>`: one node serves every linked project.
         assert!(
             !s.contains("-C "),

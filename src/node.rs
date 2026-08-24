@@ -36,48 +36,54 @@ pub async fn serve() -> Result<()> {
 
 async fn accept_loop(ep: iroh::Endpoint, machine: Machine, id: String) -> Result<()> {
     ep.online().await;
+    // Recorded here because this is the one place that has waited to come online,
+    // which makes it the only reliable answer to "where can this machine be
+    // dialled". Every short-lived command reads it from the config afterwards.
+    transport::note_self_relay(&ep, 0).await;
 
-    eprintln!("{} {}", "node".green().bold(), id.dimmed());
-    eprintln!("  build    {}", env!("SW_BUILD"));
-    eprintln!("  name     {}", machine.node_name());
-    eprintln!("  platform {}", Platform::current());
+    // Logged rather than printed, so that it reaches the log file when the node
+    // runs detached under `--log`. What is in this banner — which identity, which
+    // build, which peers and projects — is exactly what someone reading the log
+    // after the fact needs, and it used to be the one thing missing from it.
+    tracing::info!(
+        "node {id} build {} on {}",
+        env!("SW_BUILD"),
+        Platform::current()
+    );
+    tracing::info!("name {}", machine.node_name());
     if machine.peers.is_empty() {
-        eprintln!(
-            "  {} no peers paired — run `sw pair init` here, `sw pair join <ticket>` there",
-            "!".yellow()
-        );
+        tracing::warn!("no peers paired — `sw pair init` here, `sw pair join <ticket>` there");
     } else {
-        eprintln!(
-            "  peers    {}",
+        tracing::info!(
+            "peers {}",
             machine.peers.keys().cloned().collect::<Vec<_>>().join(", ")
         );
     }
     if machine.projects.is_empty() {
-        eprintln!(
-            "  {} no projects linked — run `sw link` in a checkout",
-            "!".yellow()
-        );
+        tracing::warn!("no projects linked — run `sw link` in a checkout");
     } else {
-        eprintln!("  projects");
         for (name, entry) in &machine.projects {
             let path = Path::new(&entry.path);
-            let missing = if path.is_dir() {
+            if path.is_dir() {
                 // `git worktree` records absolute paths, so a checkout that moved
                 // leaves stale administrative entries that break the next verify.
                 git::prune_worktrees(path).await;
-                String::new()
+                tracing::info!("project {name} -> {}", entry.path);
             } else {
-                format!("  {}", "(path missing)".red())
-            };
-            eprintln!("    {name} -> {}{missing}", entry.path);
+                tracing::warn!("project {name} -> {} is missing", entry.path);
+            }
         }
     }
-    eprintln!("{}", "waiting for requests (ctrl-c to stop)".dimmed());
+    tracing::info!("waiting for requests");
 
     loop {
         let Some(incoming) = ep.accept().await else {
             break;
         };
+        // Re-checked per connection so a machine that moved networks stops
+        // advertising an address it left behind. Writes only on change, so this is
+        // a comparison in the ordinary case.
+        transport::note_self_relay(&ep, 0).await;
         tokio::spawn(async move {
             match incoming.await {
                 Ok(conn) => {
@@ -132,7 +138,7 @@ async fn handle_connection(conn: Connection) -> Result<()> {
             // Normal shutdown looks like an error on the accept side.
             Err(_) => return Ok(()),
         };
-        if let Err(e) = route(tx, rx, &peer_name).await {
+        if let Err(e) = route(tx, rx, &peer_name, &remote.to_string()).await {
             tracing::error!("{peer_name}: request failed: {e:#}");
         }
         // Sampled after the work, which is when the answer is meaningful: by now
@@ -146,8 +152,25 @@ async fn handle_connection(conn: Connection) -> Result<()> {
 }
 
 /// Read one request and hand it to the module that owns it.
-async fn route(mut tx: SendStream, mut rx: RecvStream, peer_name: &str) -> Result<()> {
-    let req: Request = transport::read_json(&mut rx).await?;
+async fn route(
+    mut tx: SendStream,
+    mut rx: RecvStream,
+    peer_name: &str,
+    peer_id: &str,
+) -> Result<()> {
+    let envelope: transport::Envelope = transport::read_json(&mut rx).await?;
+    // Where the peer says it lives, kept so this machine can dial back without
+    // depending on a public directory being willing to resolve its key. Logged
+    // when it changes, because "the peer became dialable" is exactly the fact
+    // someone debugging an unreachable peer is looking for.
+    if let Some(relay) = &envelope.relay {
+        match Machine::record_relay(peer_id, relay) {
+            Ok(true) => tracing::info!("{peer_name}: reachable at {relay}"),
+            Ok(false) => {}
+            Err(e) => tracing::warn!("could not record {peer_name}'s address: {e:#}"),
+        }
+    }
+    let req = envelope.request;
     // Requests are logged as they arrive. All the interesting output — stages,
     // build logs, diagnostics — is streamed to the *requester*, so without this
     // the node looks idle even while it is compiling.
@@ -314,9 +337,9 @@ async fn ping_peer(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<()
 
 async fn ping_exchange(conn: &iroh::endpoint::Connection) -> Result<()> {
     let (mut tx, mut rx) = transport::open_request(conn).await?;
-    transport::write_json(
+    transport::write_request(
         &mut tx,
-        &Request::Ping {
+        Request::Ping {
             protocol: PROTOCOL_VERSION,
         },
     )

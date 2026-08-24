@@ -56,6 +56,16 @@ pub async fn run(peer_filter: Option<&str>) -> Result<i32> {
         Err(e) => r.fail("state", format!("{e:#}")),
     }
     r.ok("build", env!("SW_BUILD"));
+    // The mirror of the per-peer address check below: this is what outgoing
+    // requests tell the other machine, and without it the other machine can only
+    // reach here for as long as public discovery keeps answering.
+    match transport::self_relay() {
+        Some(relay) => r.ok("address", relay),
+        None => {
+            r.warn("address", "not established yet — start the node");
+            r.note("peers can only find this machine through public discovery until then");
+        }
+    }
 
     match service::running_nodes() {
         Some(0) => r.fail(
@@ -144,9 +154,9 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
         async move {
             let conn = transport::connect(&ep, &peer).await?;
             let (mut tx, mut rx) = transport::open_request(&conn).await?;
-            transport::write_json(
+            transport::write_request(
                 &mut tx,
-                &Request::Ping {
+                Request::Ping {
                     protocol: PROTOCOL_VERSION,
                 },
             )
@@ -169,6 +179,7 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
         Ok((Event::Accepted { host, build, .. }, paths)) => {
             r.ok(name, format!("{host} reachable"));
             r.note(paths);
+            address(r, peer);
             // Reaching it at all proves the keys agree: the peer authorises by
             // public key, so a stale record on its side would have refused us.
             r.ok("keys", "agree (the peer accepted this machine's key)");
@@ -177,7 +188,14 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
                 r.warn("build", "peer did not report one — it predates this check");
             } else if build != local {
                 r.warn("build", format!("peer {build}, here {local}"));
-                r.note("if you just updated, the peer's node is still on old code: `sw service restart` there");
+                // The two reasons the stamps differ need opposite responses, and
+                // telling someone to restart a node that is already current is
+                // worse than saying nothing.
+                if build.trim_end_matches("-dirty") == local.trim_end_matches("-dirty") {
+                    r.note("same commit — one side has uncommitted changes compiled in");
+                } else {
+                    r.note("if you just updated, the peer's node is still on old code: `sw service restart` there");
+                }
             } else {
                 r.ok("build", format!("{build} on both"));
             }
@@ -194,7 +212,28 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
             } else {
                 r.warn(name, "not reachable");
                 r.note(text);
+                address(r, peer);
             }
+        }
+    }
+}
+
+/// Report whether this machine can name the peer without help.
+///
+/// Worth a line of its own because it distinguishes two failures that read
+/// identically otherwise: the peer being asleep, and this machine having no way to
+/// address it. The second one was live for a day — n0's DNS stopped answering for
+/// one of the two keys while still answering for the other — and nothing on either
+/// machine said so.
+fn address(r: &mut Report, peer: &crate::config::Peer) {
+    match &peer.relay {
+        Some(relay) => r.ok("address", format!("{relay} (cached)")),
+        None => {
+            r.warn(
+                "address",
+                "none cached — dialling relies on public discovery",
+            );
+            r.note("recorded automatically the first time that machine sends a request here");
         }
     }
 }

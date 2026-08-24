@@ -40,34 +40,71 @@ mod verify;
 use crate::style::Paint;
 use clap::Parser;
 
+/// Open the node's log file, creating it and appending.
+///
+/// Appends rather than truncates: a node restarted to pick up a new binary is the
+/// moment its previous run's last words matter most.
+fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            // Our own info lines (the node's per-request log) plus errors from
-            // anywhere. Dependency *warnings* are deliberately excluded: they
-            // describe transport internals the operator cannot act on, and they
-            // interleave with our output mid-line, e.g.
-            //
-            //   peer mac-mini ... WARN noq_proto: failed closing path err=...
-            //   error: could not reach peer; is `sw node` running there?
-            //
-            // where the actionable message is the second line. `SW_LOG=debug`
-            // brings everything back when diagnosing connectivity.
-            //
-            // The crate name comes from the environment rather than being spelled
-            // out: a tracing target defaults to `module_path!()`, whose root is
-            // the *binary* name (`sw`), not the package name (`syncwork`).
-            // Hard-coding the package name silently dropped every info event.
-            tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
-                .unwrap_or_else(|_| format!("error,{}=info", env!("CARGO_CRATE_NAME")).into()),
-        )
-        .with_writer(std::io::stderr)
-        .init();
-
-    // Parsed before anything is printed so `--color` applies to the whole run,
-    // including the error path below.
+    // Parsed before the subscriber is built, because `sw node --log` decides where
+    // the log goes and clap is the only thing that knows.
     let cli = cli::Cli::parse();
+    let log_file = match &cli.command {
+        cli::Command::Node { log: Some(path) } => match open_log(path) {
+            Ok(f) => Some(f),
+            // Reported and then ignored: a node that cannot write its log is still
+            // a working node, and refusing to start would take the whole machine
+            // out of service over a file permission.
+            Err(e) => {
+                eprintln!(
+                    "{} could not open {}: {e}",
+                    "warning:".yellow(),
+                    path.display()
+                );
+                None
+            }
+        },
+        _ => None,
+    };
+
+    let builder = tracing_subscriber::fmt().with_env_filter(
+        // Our own info lines (the node's per-request log) plus errors from
+        // anywhere. Dependency *warnings* are deliberately excluded: they
+        // describe transport internals the operator cannot act on, and they
+        // interleave with our output mid-line, e.g.
+        //
+        //   peer mac-mini ... WARN noq_proto: failed closing path err=...
+        //   error: could not reach peer; is `sw node` running there?
+        //
+        // where the actionable message is the second line. `SW_LOG=debug`
+        // brings everything back when diagnosing connectivity.
+        //
+        // The crate name comes from the environment rather than being spelled
+        // out: a tracing target defaults to `module_path!()`, whose root is
+        // the *binary* name (`sw`), not the package name (`syncwork`).
+        // Hard-coding the package name silently dropped every info event.
+        tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
+            .unwrap_or_else(|_| format!("error,{}=info", env!("CARGO_CRATE_NAME")).into()),
+    );
+    // Escape codes are for terminals: a log file must stay greppable, and this
+    // one is read with `sw service logs` and by whoever is diagnosing a node.
+    match log_file {
+        Some(file) => builder.with_writer(file).with_ansi(false).init(),
+        None => builder.with_writer(std::io::stderr).init(),
+    }
+
+    // Applied before anything is printed, so `--color` covers the whole run,
+    // including the error path below.
     style::set_enabled(match cli.color {
         cli::ColorWhen::Always => true,
         cli::ColorWhen::Never => false,

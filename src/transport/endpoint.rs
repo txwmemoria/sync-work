@@ -57,18 +57,101 @@ where
     out
 }
 
-/// Connect to a peer. Falls back from the address hint to discovery-by-id,
-/// because a hint recorded at pairing time goes stale when a laptop changes
-/// network, while the id never does.
-pub async fn connect(ep: &Endpoint, peer: &Peer) -> Result<iroh::endpoint::Connection> {
+/// Where to dial a peer: its key, plus the last address it gave us.
+///
+/// Both, not either. The key is what discovery resolves and never changes; the
+/// cached relay is what makes the dial work when discovery declines to answer.
+/// iroh inserts a supplied address as one more candidate path and *still* starts
+/// a lookup if none of them gets selected, so this is additive — a relay that has
+/// gone stale costs a probe, not the command.
+fn dial_addr(peer: &Peer) -> Result<iroh::EndpointAddr> {
     let id = EndpointId::from_str(&peer.id)
         .with_context(|| format!("peer id `{}` is not a valid endpoint id", peer.id))?;
-    ep.connect(id, ALPN).await.with_context(|| {
-        format!(
-            "could not reach peer {:.12}; is `sw node` running there?",
+    let mut addr = iroh::EndpointAddr::new(id);
+    if let Some(relay) = &peer.relay {
+        match iroh::RelayUrl::from_str(relay) {
+            Ok(url) => addr = addr.with_relay_url(url),
+            // Not fatal: a malformed cached address must not stop us falling back
+            // to the thing that worked before there was a cache.
+            Err(e) => tracing::warn!("ignoring unusable cached address `{relay}`: {e}"),
+        }
+    }
+    Ok(addr)
+}
+
+/// Connect to a peer, by cached address and by discovery at once.
+pub async fn connect(ep: &Endpoint, peer: &Peer) -> Result<iroh::endpoint::Connection> {
+    let addr = dial_addr(peer)?;
+    let cached = !addr.addrs.is_empty();
+    let conn = match ep.connect(addr, ALPN).await {
+        Ok(conn) => conn,
+        Err(e) if !cached && format!("{e}").contains("No addressing information") => {
+            // Distinct from "the node is down": nothing was even tried, because
+            // nobody would say where to try. Worth its own message — the fix is
+            // not on this machine.
+            bail!(
+                "no address for peer {:.12}: nothing cached here, and public discovery \
+                 had no answer for its key. The peer's address is recorded the first \
+                 time it sends a request to this machine, so run `sw doctor` there once \
+                 and try again.",
+                peer.id
+            )
+        }
+        // Deliberately not `.context()` on the original error. iroh's dial errors
+        // nest a source chain of identical messages, so anyhow's `{:#}` rendered
+        // them as `timed out: timed out: timed out` — three copies of one fact.
+        Err(e) => bail!(
+            "could not reach peer {:.12} ({e}); is `sw node` running there?",
             peer.id
-        )
-    })
+        ),
+    };
+    // A machine that has never run a node has nothing recorded, so this is the
+    // one moment a client can learn its own address: the dial is done, which for
+    // a relayed path means our relay client is up.
+    if self_relay().is_none() {
+        note_self_relay(ep, 50).await;
+    }
+    Ok(conn)
+}
+
+/// This machine's own address, as a peer would dial it.
+///
+/// Read from the machine config rather than sampled per process, because the two
+/// are not equally reliable. What a peer dials is this machine's *node*, and the
+/// node establishes its address once at startup after waiting to come online. A
+/// short-lived client — `sw ctx` from a Stop hook, say — routinely finishes its
+/// whole exchange before its own endpoint has found a relay: measured at about
+/// three seconds from bind, which is longer than the command takes.
+///
+/// So the node writes it down and everything else reads it. Whoever discovers it
+/// first records it, which is what keeps a node-less machine working too.
+pub fn self_relay() -> Option<String> {
+    Machine::load().ok()?.node.relay
+}
+
+/// Record this machine's own address, waiting up to `patience` tenths of a second.
+///
+/// Returns as soon as it is known, so the node — which has already awaited
+/// `online()` — pays nothing. The wait is for the cold client above, and is
+/// bounded because it need not succeed: a dial that went direct across a LAN may
+/// have no relay at all, and then the peer simply learns our address later.
+pub async fn note_self_relay(ep: &Endpoint, patience: u32) {
+    for remaining in (0..=patience).rev() {
+        if let Some(url) = ep.addr().relay_urls().next().map(|u| u.to_string()) {
+            match Machine::record_self_relay(&url) {
+                // Debug, not info: this fires inside ordinary commands like
+                // `sw status`, and a line about our own plumbing has no business
+                // in their output. `sw doctor` reports the address on request.
+                Ok(true) => tracing::debug!("this machine is reachable at {url}"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("could not record this machine's address: {e:#}"),
+            }
+            return;
+        }
+        if remaining > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
 }
 
 /// Resolved relay addresses, cached for the life of the process.
@@ -236,6 +319,25 @@ mod tests {
             platform: Platform::Macos,
             acking: None,
         }
+    }
+
+    #[test]
+    fn a_dial_carries_the_cached_address_alongside_the_key() {
+        // Nothing cached: the key alone, which leaves iroh dependent on a public
+        // directory answering for it.
+        let bare = dial_addr(&sample().as_peer()).unwrap();
+        assert!(bare.addrs.is_empty());
+
+        let mut peer = sample().as_peer();
+        peer.relay = Some("https://relay.example./".into());
+        let addr = dial_addr(&peer).unwrap();
+        assert_eq!(addr.relay_urls().count(), 1, "relay is offered to the dial");
+
+        // A cached address that cannot be parsed must degrade to the bare key
+        // rather than failing the dial — otherwise one bad config line would take
+        // out a pair that discovery could still have resolved.
+        peer.relay = Some("not a url".into());
+        assert!(dial_addr(&peer).unwrap().addrs.is_empty());
     }
 
     #[test]

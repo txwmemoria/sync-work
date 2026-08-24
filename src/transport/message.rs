@@ -32,6 +32,36 @@ pub fn version_mismatch(theirs: u32) -> String {
     )
 }
 
+/// A request, plus where the machine that sent it can be reached.
+///
+/// The sender has to state its own address, because the receiver cannot work it
+/// out. An inbound relayed path names the relay the packets *arrived through* —
+/// which is the receiver's own home relay, not the sender's. Dialling that back
+/// only works when both machines happen to share one relay, so inferring it would
+/// be a bug that hides for as long as the two machines sit in the same region.
+///
+/// Carried on every request rather than negotiated once, so it needs no state and
+/// no extra round trip, and a machine that moves networks corrects itself with
+/// its next request.
+///
+/// `#[serde(flatten)]` keeps this on the wire as the same flat object a bare
+/// request produced, with one extra key. That is what makes it compatible in both
+/// directions — an older peer ignores the unknown `relay` key, and a request from
+/// an older peer leaves it `None` — so this needed no protocol bump. Which
+/// matters more than usual here: the version number itself travels *inside* the
+/// request, so a peer that cannot parse the outer shape cannot report a version
+/// mismatch either. Wrapping the request in a new object would have turned every
+/// mismatched pair into an unexplained parse failure.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Envelope {
+    /// The sender's home relay, as the sender sees it. `None` when it does not
+    /// know yet, in which case the receiver simply learns nothing this time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<String>,
+    #[serde(flatten)]
+    pub request: Request,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum Request {
@@ -208,6 +238,67 @@ pub enum CtxFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The address rides along inside the request object, which is what lets it
+    /// cross between versions in either direction. If this ever regresses into a
+    /// wrapper object, every mismatched pair loses its version-mismatch message
+    /// too, since the version travels inside the request.
+    #[test]
+    fn an_addressed_request_is_wire_compatible_with_a_bare_one() {
+        let addressed = Envelope {
+            relay: Some("https://relay.example/".into()),
+            request: Request::Ping { protocol: 7 },
+        };
+        let raw = serde_json::to_vec(&addressed).unwrap();
+
+        // Flat, not nested: the request's own keys sit alongside `relay`.
+        let map: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(map["t"], "ping");
+        assert_eq!(map["protocol"], 7);
+        assert_eq!(map["relay"], "https://relay.example/");
+
+        // Forwards: a peer that predates the field ignores it and still reads the
+        // request — including the version number it needs to report a mismatch.
+        let old_reader: Request = serde_json::from_slice(&raw).unwrap();
+        assert!(matches!(old_reader, Request::Ping { protocol: 7 }));
+
+        // Backwards: a request from such a peer carries no address, and that is
+        // not an error — it just teaches us nothing this time.
+        let old_wire = serde_json::to_vec(&Request::Ping { protocol: 7 }).unwrap();
+        let read: Envelope = serde_json::from_slice(&old_wire).unwrap();
+        assert!(read.relay.is_none());
+        assert!(matches!(read.request, Request::Ping { protocol: 7 }));
+    }
+
+    /// A newtype variant flattens too, so the check above must not be the only
+    /// shape tested.
+    #[test]
+    fn a_struct_carrying_variant_survives_the_same_round_trip() {
+        let addressed = Envelope {
+            relay: Some("https://relay.example/".into()),
+            request: Request::Verify(VerifyRequest {
+                protocol: PROTOCOL_VERSION,
+                project: "syncwork".into(),
+                recipe: "ci".into(),
+                base: "abc123".into(),
+                patch_bytes: 0,
+                from_host: "niugm-pc".into(),
+                color: false,
+            }),
+        };
+        let raw = serde_json::to_vec(&addressed).unwrap();
+        let back: Envelope = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(back.relay.as_deref(), Some("https://relay.example/"));
+        match back.request {
+            Request::Verify(v) => assert_eq!(v.recipe, "ci"),
+            other => panic!("wrong variant: {other:?}"),
+        }
+        // And an older peer still reads the request out of it.
+        assert!(matches!(
+            serde_json::from_slice::<Request>(&raw).unwrap(),
+            Request::Verify(_)
+        ));
+    }
 
     #[test]
     fn events_round_trip_through_json() {

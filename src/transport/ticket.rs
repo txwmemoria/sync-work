@@ -99,6 +99,11 @@ impl Ticket {
         Peer {
             id: self.id.clone(),
             platform: self.platform,
+            // Not carried in the ticket: a ticket is copied by hand and may sit in
+            // a chat window for a day, while a relay assignment follows whichever
+            // network the machine is on. The address is learned instead from the
+            // peer's first request, where it is current by construction.
+            relay: None,
         }
     }
 }
