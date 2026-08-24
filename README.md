@@ -200,67 +200,90 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 
 ## syncwork.toml 参考
 
-**每个仓库一份**，放在仓库根目录、提交进 git，两台机器读到同一份 —— 这是「双端执行相同配方」的保证。多项目不是在一份文件里写多个 `[project]`，而是每个仓库各写各的；名字对路径的映射在机器注册表里，由 `sw link` 维护。
+**每个仓库一份**，放在仓库根目录、提交进 git，两台机器读到同一份。多项目不是在一份文件里写多个 `[project]`，而是每个仓库各写各的；名字到路径的映射由 `sw link` 记在各机自己的注册表里。
 
-先分清**哪些是固定结构、哪些随便你定**：
+### 先看骨架：哪些字是你起的
 
-| 键 | 性质 |
-|---|---|
-| `[project]` 的 `name` / `remote` | 固定键名，值你定。`name` 是两台机器认项目的凭据，改了两边要一起改 |
-| `[recipes.<名字>]` | **名字和数量完全自由**。`ci` 只是 `sw verify` 不带参数时的默认名，没有别的特殊性；每个配方里 `steps`（必填）、`env`、`cargo_json`、平台覆盖块是固定键名 |
-| `[context]` 的 `quiet_secs` | 固定键名，值可调（默认 5 秒） |
-| `[context.roots.<名字>]` | **名字和数量完全自由**；每个根里 `kind`（必填：三选一）、`path`、`env` 是固定键名 |
+整个文件只有四种段落。方括号里凡是 `<...>` 的位置，名字由你起、数量随意；其余全是固定键名：
 
-不想手改文件的话，全部可以用命令一步步搭：
-
-```bash
-sw init                                      # 向导：逐项询问（脚本里跑则静默取默认值）
-sw recipe                                    # 列出所有配方
-sw recipe add e2e "bash tests/e2e.sh"        # 加一个（同名即覆盖），跑法：sw verify e2e
-sw recipe add ci "cargo test" --platform windows   # 给已有配方加平台覆盖
-sw recipe remove e2e
-sw root                                      # 列出上下文根，并显示各自在本机指向哪
-sw root add notes --kind repo --path docs/ai
-sw root remove notes
+```
+[project]                      每份文件恰好一个
+[recipes.<配方名>]              想加几个加几个；"ci" 只是 sw verify 的默认参数名
+[recipes.<配方名>.<平台>]       可选的平台覆盖：windows / macos / linux
+[context]                      至多一个
+[context.roots.<根名>]          想加几个加几个
 ```
 
-这些命令用保留注释的方式改文件 —— 你手写的注释和排版不会被冲掉，改完还会先校验再落盘。完整示例：
+三个最常见的误读都出在这里：`ci` 和 `check` **不是保留字**，只是模板给的两个示例配方；「在一份文件里配置多个项目」**不存在**，一个仓库一份文件；`recipes.ci` **没有自动触发机制**，它只是 `sw verify` 不带参数时默认查找的名字。
+
+### 全部的键，一张表查完
+
+| 键 | 必填 | 默认 | 作用 |
+|---|---|---|---|
+| `project.name` | 是 | — | 两台机器认出「同一个项目」的名字，改了要两边一起改 |
+| `project.remote` | 否 | `origin` | 对端缺 commit 时从这个远端 fetch |
+| `recipes.<名>.steps` | 是 | — | 依次执行的 shell 命令，一条失败即停，退出码带回发起方 |
+| `recipes.<名>.env` | 否 | 空 | 执行时注入的环境变量 |
+| `recipes.<名>.cargo_json` | 否 | `true` | 给 cargo 命令注入 JSON 诊断输出（非 Rust 项目无影响） |
+| `recipes.<名>.<平台>.steps` | 否 | — | 平台覆盖：**整体替换**基础 steps |
+| `recipes.<名>.<平台>.env` | 否 | — | 平台覆盖：与基础 env **合并** |
+| `context.quiet_secs` | 否 | `5` | 最近几秒内还在被写入的文件，本轮同步先跳过 |
+| `context.roots.<名>.kind` | 是 | — | 三选一：`claude-project`（Claude Code 的按项目目录，路径自动推导）/ `home`（相对各机 home）/ `repo`（相对仓库目录） |
+| `context.roots.<名>.path` | kind 为 home/repo 时必填 | — | 相对路径。禁止绝对路径 —— 一台机器的绝对路径在另一台上没有意义 |
+| `context.roots.<名>.env` | 否 | — | 仅 home 可用：该环境变量有值时替换 home |
+
+### 一份注释完整的示例
 
 ```toml
 [project]
-name = "myapp"              # 两台机器靠这个名字认出「同一个项目」
-remote = "origin"           # 对端缺 commit 时，从这个远端 fetch
+name = "myapp"
+remote = "origin"
 
-[recipes.ci]                # sw verify 的默认配方
+[recipes.ci]                # sw verify 默认跑它
 steps = ["cargo build --release --all-targets", "cargo test --all"]
 
 [recipes.check]             # sw verify check
 steps = ["cargo clippy --all-targets -- -D warnings"]
 
-[recipes.ci.windows]        # 平台覆盖：windows / macos / linux
+[recipes.ci.windows]        # Windows 上 ci 换用这组 steps，env 则与基础合并
 steps = ["cargo build --release", "cargo test --all -- --test-threads=1"]
-env = { CC = "clang-cl" }   # steps 整体替换，env 与基础合并
+env = { CC = "clang-cl" }
 
 [context]
-quiet_secs = 5              # 最近 5 秒还在被写入的文件，这一轮先不动
+quiet_secs = 5
 
-[context.roots.claude]      # 同步哪些 AI 状态目录 —— 声明式，不写死在代码里
-kind = "claude-project"     # Claude Code 的按项目目录（名字由路径推导）
+[context.roots.claude]      # Claude Code 会话与记忆
+kind = "claude-project"
 
-[context.roots.codex]
-kind = "home"               # 相对各自机器的 home
-path = ".codex/sessions"    # 可加 env = "SOME_HOME" 覆盖 home
+[context.roots.codex]       # 另一个 AI 工具：接入 = 写这几行，不改代码
+kind = "home"
+path = ".codex/sessions"
 
-[context.roots.notes]
-kind = "repo"               # 相对仓库目录，放 git 不跟踪的状态
+[context.roots.notes]       # 仓库里 git 不跟踪的目录也能同步
+kind = "repo"
 path = "docs/ai-notes"
 ```
 
-三种 `kind` 都是**规则**而不是路径 —— 各台机器按规则找到自己的目录，网络上只传根的名字（一台机器的绝对路径，拿到另一台上毫无意义）。接入新 AI 工具就是四行配置。根必须是**目录**，指向单个文件（如 Aider 的 `.aider.chat.history.md`）会告警且同步不到，指它所在的目录即可。旧的 `claude = true` / `extra` 写法仍然认识。
+### 不想手改文件：用命令搭
 
-配方数量和名字都随意（`sw verify <名字>` 按名调用），每个 step 交给真实 shell 执行（Windows 是 PowerShell，macOS/Linux 是 `/bin/sh`），管道、重定向、调用仓库里的脚本文件都可以 —— 工具不限于 Rust，node / python / make 项目一样用。两个细节：**对端执行的命令来自它自己那份 `syncwork.toml`**（发起方只能点名配方，patch 注入不了命令），所以改配方要提交并让对端拉取后才跨机生效；而**脚本文件的内容跟着 patch 走**（worktree 就是你当前的工作区），把复杂逻辑放进脚本、配方只写一行调用，就能未提交也即时生效。
+```bash
+sw init                                      # 向导逐项询问（在脚本里跑则静默取默认值）
+sw recipe                                    # 列出所有配方
+sw recipe add e2e "bash tests/e2e.sh"        # 加/覆盖，跑法：sw verify e2e
+sw recipe add ci "cargo test" --platform windows   # 给已有配方加平台覆盖
+sw recipe remove e2e
+sw root                                      # 列出根，并显示各自在本机指向哪个目录
+sw root add notes --kind repo --path docs/ai
+sw root remove notes
+```
 
-配方里的 cargo 命令自动注入 `--message-format=json-diagnostic-rendered-ansi`，失败以带 `file:line` 的结构化诊断回传，非 cargo 输出当普通日志透传；不想要就设 `cargo_json = false`。
+命令编辑会保留你手写的注释和排版，落盘前先校验。
+
+### 三条行为规则
+
+1. **step 在真实 shell 里跑**（Windows 是 PowerShell，macOS/Linux 是 `/bin/sh`），管道、重定向、调脚本都行 —— 但两平台 shell 语法有差异，跨平台命令写成单条（如用 `--manifest-path` 代替 `cd xx &&`），或干脆用平台覆盖。
+2. **对端执行的是它自己那份配方**（发起方只能点名字，patch 注入不了命令）—— 所以改了配方要提交、对端拉取后才跨机生效。
+3. **脚本文件的内容跟着 patch 走**（worktree 就是你当前的工作区）—— 把复杂逻辑放进脚本、配方只写一行调用，未提交的脚本改动也即时生效。
 
 ## 环境变量
 
