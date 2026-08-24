@@ -19,13 +19,14 @@ use iroh::{Endpoint, EndpointId};
 use std::collections::BTreeMap;
 use std::str::FromStr;
 
-/// Bind the local endpoint using the persistent identity.
+/// Bind an endpoint on the given key.
 ///
-/// Deliberately private: [`with_endpoint`] is the only way to obtain an endpoint,
-/// which makes it impossible for a caller to skip the close.
-async fn bind(identity: &Identity) -> Result<Endpoint> {
+/// Deliberately private: [`with_endpoint`] and [`with_machine_endpoint`] are the
+/// only ways to obtain one, which makes it impossible for a caller to skip the
+/// close.
+async fn bind(secret: iroh::SecretKey) -> Result<Endpoint> {
     let ep = Endpoint::builder(presets::N0)
-        .secret_key(identity.secret.clone())
+        .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
         .bind()
         .await
@@ -33,28 +34,100 @@ async fn bind(identity: &Identity) -> Result<Endpoint> {
     Ok(ep)
 }
 
-/// Bind, run `f`, and close — whatever `f` returns.
-///
-/// The manual `bind` / `close` pairing is easy to get wrong, because the failure
-/// is silent in the happy case and only shows up as library noise stamped on top
-/// of a real error message. Wrapping it means the close cannot be skipped by an
-/// early return, so there is one less way to produce output like:
-///
-/// ```text
-/// ERROR iroh::socket: Endpoint dropped without calling `Endpoint::close`.
-/// error: no peers paired yet; run `sw pair init` on one machine
-/// ```
-pub async fn with_endpoint<T, F, Fut>(identity: &Identity, f: F) -> Result<T>
+async fn with_bound<T, F, Fut>(secret: iroh::SecretKey, f: F) -> Result<T>
 where
     F: FnOnce(Endpoint) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let ep = bind(identity).await?;
+    let ep = bind(secret).await?;
     // Endpoint is a cheap handle; the clone lets `f` own one while this scope
     // keeps the one it closes.
     let out = f(ep.clone()).await;
     ep.close().await;
     out
+}
+
+/// Bind a *client* endpoint: a throwaway key, speaking for the machine.
+///
+/// Never the machine key, and this is load-bearing: the relay keeps one active
+/// connection per key and deactivates the previous one, so a client dialling
+/// with the machine key knocks this machine's own node off the relay for as
+/// long as the client runs. `sw ctx --watch` made that permanent — the peer's
+/// `sw doctor` timed out against a machine whose node was up the whole time.
+/// Every requests carries [`super::Delegation`] instead, signed here, so the
+/// receiver authorizes the machine without the machine key ever dialling.
+///
+/// The bind/close pairing is wrapped for the same reason as ever: a skipped
+/// close is silent in the happy case and shows up as library noise stamped on
+/// top of a real error message.
+pub async fn with_endpoint<T, F, Fut>(identity: &Identity, f: F) -> Result<T>
+where
+    F: FnOnce(Endpoint) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let secret = iroh::SecretKey::generate();
+    let delegation = sign_delegation(identity, secret.public());
+    if let Ok(mut slot) = DELEGATION.lock() {
+        *slot = Some(delegation);
+    }
+    with_bound(secret, f).await
+}
+
+/// Bind the endpoint that *is* this machine: the node, and pairing.
+///
+/// The node must hold the machine key — that key is the address peers dial.
+/// Pairing must too, because coming online is what publishes the key the ticket
+/// carries. Everything else goes through [`with_endpoint`].
+pub async fn with_machine_endpoint<T, F, Fut>(identity: &Identity, f: F) -> Result<T>
+where
+    F: FnOnce(Endpoint) -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    with_bound(identity.secret.clone(), f).await
+}
+
+/// This process's delegation, set when its client endpoint is created.
+///
+/// Process-global for the same reason as the relay below: it is a property of
+/// the single endpoint this process binds, and threading it through every
+/// request-writing call site would be plumbing for a value that cannot differ.
+static DELEGATION: std::sync::Mutex<Option<super::Delegation>> = std::sync::Mutex::new(None);
+
+/// The delegation to put on an outgoing request, if this process dials as a client.
+pub fn delegation() -> Option<super::Delegation> {
+    DELEGATION.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// Sign a throwaway connection key with the machine key.
+fn sign_delegation(identity: &Identity, conn_key: EndpointId) -> super::Delegation {
+    let sig = identity.secret.sign(&super::delegation_message(&conn_key));
+    super::Delegation {
+        id: identity.id_string(),
+        sig: hex::encode(sig.to_bytes()),
+    }
+}
+
+/// Check a delegation against the connection that presented it.
+///
+/// Three things must hold, and each failure names itself: the signature parses,
+/// it covers *this connection's* key (a signature over some other key proves
+/// nothing about this sender), and the signing machine is one we trust.
+pub fn verify_delegation(
+    machine: &Machine,
+    conn_key: EndpointId,
+    d: &super::Delegation,
+) -> Result<(String, Peer)> {
+    let signer = EndpointId::from_str(&d.id)
+        .map_err(|_| anyhow::anyhow!("delegation names an invalid machine key"))?;
+    let raw = hex::decode(&d.sig).context("delegation signature is not hex")?;
+    let sig = iroh::Signature::try_from(raw.as_slice())
+        .map_err(|_| anyhow::anyhow!("delegation signature is malformed"))?;
+    signer
+        .verify(&super::delegation_message(&conn_key), &sig)
+        .map_err(|_| {
+            anyhow::anyhow!("delegation signature does not cover this connection's key")
+        })?;
+    authorize(machine, signer)
 }
 
 /// Where to dial a peer: its key, plus the last address it gave us.
@@ -338,6 +411,69 @@ mod tests {
         // out a pair that discovery could still have resolved.
         peer.relay = Some("not a url".into());
         assert!(dial_addr(&peer).unwrap().addrs.is_empty());
+    }
+
+    /// The delegation is an authorization boundary, so the refusals are the
+    /// point: every way a signature can fail to bind THIS machine key to THIS
+    /// connection key must be refused, or an attacker who saw one valid
+    /// delegation could reuse it from their own connection.
+    #[test]
+    fn a_delegation_admits_the_machine_and_nothing_else() {
+        let machine_key = iroh::SecretKey::generate();
+        let identity = Identity {
+            secret: machine_key.clone(),
+        };
+        let mut table = Machine::default();
+        table.peers.insert(
+            "mac".into(),
+            crate::config::Peer {
+                id: machine_key.public().to_string(),
+                platform: Platform::Macos,
+                relay: None,
+            },
+        );
+
+        let conn_key = iroh::SecretKey::generate().public();
+        let d = sign_delegation(&identity, conn_key);
+
+        // The happy path authorizes the MACHINE — its name and its key, not the
+        // throwaway the connection used.
+        let (name, peer) = verify_delegation(&table, conn_key, &d).unwrap();
+        assert_eq!(name, "mac");
+        assert_eq!(peer.id, machine_key.public().to_string());
+
+        // A delegation lifted from one connection proves nothing on another:
+        // the signature covers the connection key.
+        let other_conn = iroh::SecretKey::generate().public();
+        assert!(verify_delegation(&table, other_conn, &d).is_err());
+
+        // A valid signature from a machine we never paired with is still refused.
+        let stranger = iroh::SecretKey::generate();
+        let sd = sign_delegation(
+            &Identity {
+                secret: stranger.clone(),
+            },
+            conn_key,
+        );
+        assert!(verify_delegation(&table, conn_key, &sd).is_err());
+
+        // Claiming a paired machine while signing with a different key fails on
+        // the signature, not on the table lookup.
+        let forged = super::super::Delegation {
+            id: machine_key.public().to_string(),
+            ..sd
+        };
+        assert!(verify_delegation(&table, conn_key, &forged).is_err());
+
+        // Garbage in either field is an error, not a panic.
+        for (id, sig) in [
+            ("not hex".to_string(), d.sig.clone()),
+            (d.id.clone(), "zz".to_string()),
+            (d.id.clone(), hex::encode([0u8; 10])),
+        ] {
+            let bad = super::super::Delegation { id, sig };
+            assert!(verify_delegation(&table, conn_key, &bad).is_err());
+        }
     }
 
     #[test]

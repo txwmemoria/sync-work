@@ -69,7 +69,9 @@ pub async fn serve() -> Result<()> {
     let machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
     let id = identity.id_string();
-    transport::with_endpoint(
+    // The machine key, not a throwaway: this key IS the address peers dial, and
+    // the node is the one process allowed to hold it on the wire.
+    transport::with_machine_endpoint(
         &identity,
         |ep| async move { accept_loop(ep, machine, id).await },
     )
@@ -143,44 +145,44 @@ async fn accept_loop(ep: iroh::Endpoint, machine: Machine, id: String) -> Result
 async fn handle_connection(conn: Connection) -> Result<()> {
     let remote = conn.remote_id();
 
-    // Re-read so a machine paired since startup is recognised immediately.
-    let machine = Machine::load()?;
-    let paths = transport::describe_paths(&conn).await;
-    let (peer_name, _peer) = match transport::authorize(&machine, remote) {
-        Ok(v) => v,
-        Err(_) => {
-            // The full key, not a prefix: an unpaired sender has no entry to look
-            // up, so this line is the only place the operator can see what key to
-            // expect. Truncating it here is what made this hard to diagnose.
-            tracing::warn!(
-                "refused unpaired peer {remote} via {paths}; \
-                 known peers: [{}]. If that is your other machine, its key changed \
-                 — re-pair with `sw pair init` / `sw pair join`",
-                machine
-                    .peers
-                    .iter()
-                    .map(|(n, p)| format!("{n}={:.12}", p.id))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
-            conn.close(1u8.into(), b"unpaired");
-            return Ok(());
-        }
-    };
-    // Debug, not info: the path sampled here is always the relay. A connection
-    // starts relayed and only gains a direct path once holepunching completes,
-    // so reporting it at connect time would claim every transfer went through
-    // the relay when most of the bytes did not.
-    tracing::debug!("{peer_name} connected, initial path {paths}");
-
-    // A connection may carry several requests; loop until the peer hangs up.
+    // A connection may carry several requests; loop until the peer hangs up. Who
+    // it speaks for is decided per request, from each envelope — see `identify`.
+    let mut authed: Option<(String, String)> = None;
     loop {
-        let (tx, rx) = match conn.accept_bi().await {
+        let (tx, mut rx) = match conn.accept_bi().await {
             Ok(pair) => pair,
             // Normal shutdown looks like an error on the accept side.
             Err(_) => return Ok(()),
         };
-        if let Err(e) = route(tx, rx, &peer_name, &remote.to_string()).await {
+        let envelope: transport::Envelope = transport::read_json(&mut rx).await?;
+
+        let (peer_name, peer_id) = match &authed {
+            Some(v) => v.clone(),
+            None => match identify(&conn, remote, &envelope).await {
+                Some(v) => {
+                    authed = Some(v.clone());
+                    v
+                }
+                None => {
+                    conn.close(1u8.into(), b"unpaired");
+                    return Ok(());
+                }
+            },
+        };
+
+        // Where the peer says it lives, kept so this machine can dial back
+        // without depending on a public directory being willing to resolve its
+        // key. Logged when it changes, because "the peer became dialable" is
+        // exactly the fact someone debugging an unreachable peer is looking for.
+        if let Some(relay) = &envelope.relay {
+            match Machine::record_relay(&peer_id, relay) {
+                Ok(true) => tracing::info!("{peer_name}: reachable at {relay}"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!("could not record {peer_name}'s address: {e:#}"),
+            }
+        }
+
+        if let Err(e) = route(tx, envelope.request, rx, &peer_name).await {
             tracing::error!("{peer_name}: request failed: {e:#}");
         }
         // Sampled after the work, which is when the answer is meaningful: by now
@@ -193,26 +195,64 @@ async fn handle_connection(conn: Connection) -> Result<()> {
     }
 }
 
-/// Read one request and hand it to the module that owns it.
-async fn route(
-    mut tx: SendStream,
-    mut rx: RecvStream,
-    peer_name: &str,
-    peer_id: &str,
-) -> Result<()> {
-    let envelope: transport::Envelope = transport::read_json(&mut rx).await?;
-    // Where the peer says it lives, kept so this machine can dial back without
-    // depending on a public directory being willing to resolve its key. Logged
-    // when it changes, because "the peer became dialable" is exactly the fact
-    // someone debugging an unreachable peer is looking for.
-    if let Some(relay) = &envelope.relay {
-        match Machine::record_relay(peer_id, relay) {
-            Ok(true) => tracing::info!("{peer_name}: reachable at {relay}"),
-            Ok(false) => {}
-            Err(e) => tracing::warn!("could not record {peer_name}'s address: {e:#}"),
+/// Decide which paired machine a connection speaks for, or log why it does not.
+///
+/// Two accepted shapes. A client presents a delegation — its connection key is a
+/// throwaway, signed by its machine key, because dialling with the machine key
+/// itself would knock that machine's own node off the relay (the relay keeps one
+/// active connection per key). A bare machine key in the peer table is also
+/// accepted, which is what a pre-delegation peer sends.
+///
+/// Returns `(peer name, machine key)` — the machine key, not the connection key,
+/// is what the relay cache and every log line should name.
+async fn identify(
+    conn: &Connection,
+    remote: iroh::EndpointId,
+    envelope: &transport::Envelope,
+) -> Option<(String, String)> {
+    // Re-read so a machine paired since the node started is recognised
+    // immediately.
+    let machine = Machine::load().ok()?;
+
+    let outcome = match &envelope.from {
+        Some(delegation) => transport::verify_delegation(&machine, remote, delegation),
+        None => transport::authorize(&machine, remote),
+    };
+    match outcome {
+        Ok((name, peer)) => Some((name, peer.id)),
+        Err(e) => {
+            let paths = transport::describe_paths(conn).await;
+            // The full key, not a prefix: an unpaired sender has no entry to look
+            // up, so this line is the only place the operator can see what key to
+            // expect. Truncating it here is what made this hard to diagnose.
+            let claimed = envelope
+                .from
+                .as_ref()
+                .map(|d| format!(" claiming machine {}", d.id))
+                .unwrap_or_default();
+            tracing::warn!(
+                "refused peer {remote}{claimed} via {paths}: {e:#}; known peers: [{}]. \
+                 If that is your other machine, its key changed — re-pair with \
+                 `sw pair init` / `sw pair join`",
+                machine
+                    .peers
+                    .iter()
+                    .map(|(n, p)| format!("{n}={:.12}", p.id))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            None
         }
     }
-    let req = envelope.request;
+}
+
+/// Hand one request to the module that owns it.
+async fn route(
+    mut tx: SendStream,
+    req: Request,
+    mut rx: RecvStream,
+    peer_name: &str,
+) -> Result<()> {
     // Requests are logged as they arrive. All the interesting output — stages,
     // build logs, diagnostics — is streamed to the *requester*, so without this
     // the node looks idle even while it is compiling.

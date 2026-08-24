@@ -24,12 +24,17 @@ cd "$LAB"
 step() { printf '\n\033[1;36m== %s\033[0m\n' "$1"; }
 fail() { printf '\033[1;31mFAIL: %s\033[0m\n' "$1"; exit 1; }
 cleanup() {
-  if [ -n "${NODE_PID:-}" ]; then
-    kill "$NODE_PID" 2>/dev/null
-    # The node holds file handles inside $LAB; removing it while the process is
+  # Every background process, not just B's node: a failure inside the watch step
+  # would otherwise leave A's node and the watch alive, holding handles in $LAB
+  # and answering later runs from a stale binary.
+  for pid in "${NODE_PID:-}" "${A_NODE_PID:-}" "${WATCH_PID:-}"; do
+    [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  done
+  for pid in "${NODE_PID:-}" "${A_NODE_PID:-}" "${WATCH_PID:-}"; do
+    # The nodes hold file handles inside $LAB; removing it while a process is
     # still exiting fails with "device or resource busy" on Windows.
-    wait "$NODE_PID" 2>/dev/null
-  fi
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null
+  done
   cd / || return
   rm -rf "$LAB" 2>/dev/null
 }
@@ -382,6 +387,22 @@ grep -q "claude" "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "declaring a root dr
 echo "PASS declared root synced, alongside the built-in one"
 
 step "ctx --watch: picks up a change without being asked again"
+# A's own node is started FIRST, so this step also proves the fix for a real
+# incident: a client that dials with the machine key replaces the node's relay
+# registration (the relay keeps one active connection per key), so a running
+# `ctx --watch` on the Mac made the Mac undialable — `sw doctor` on Windows
+# timed out against a node that was up the whole time. Clients therefore dial
+# with throwaway keys and carry a machine-key delegation instead; with the
+# watch running, A must remain reachable from B.
+(cd "$LAB" && exec env SW_HOME="$LAB/hA" CLAUDE_CONFIG_DIR="$LAB/claudeA" "$SW" node \
+   > "$LAB/a.node.log" 2>&1) &
+A_NODE_PID=$!
+for _ in $(seq 1 60); do
+  grep -q "waiting for requests" "$LAB/a.node.log" 2>/dev/null && break
+  sleep 0.5
+done
+grep -q "waiting for requests" "$LAB/a.node.log" || { cat "$LAB/a.node.log"; fail "A's node did not start"; }
+
 # Left running in the background, as it would be in real use.
 rm -f "$CLAUDE_A/pending.jsonl"
 (cd "$LAB/A/widget" && exec env SW_HOME="$LAB/hA" CLAUDE_CONFIG_DIR="$LAB/claudeA" \
@@ -391,14 +412,20 @@ for _ in $(seq 1 40); do
   grep -q "syncing on change" "$LAB/w.err" 2>/dev/null && break
   sleep 0.5
 done
-grep -q "syncing on change" "$LAB/w.err" || { cat "$LAB/w.err"; kill $WATCH_PID 2>/dev/null; fail "watch did not start"; }
+grep -q "syncing on change" "$LAB/w.err" || { cat "$LAB/w.err"; kill $WATCH_PID $A_NODE_PID 2>/dev/null; fail "watch did not start"; }
+
+# The regression check itself: with A's watch connected to the relay, B dials A.
+# Before the fix this timed out — the watch had replaced A's node at the relay.
+OUT=$(b "$LAB" status 2>&1) \
+  || { echo "$OUT"; kill $WATCH_PID $A_NODE_PID 2>/dev/null; fail "A became unreachable while its watch was running"; }
+grep -q "up" <<<"$OUT" || { echo "$OUT"; kill $WATCH_PID $A_NODE_PID 2>/dev/null; fail "status did not reach A's node"; }
 # A file appearing after the watch is already running is the whole point.
 printf '{"turn":2}\n' > "$CLAUDE_A/watched.jsonl"
 for _ in $(seq 1 40); do
   [ -f "$CLAUDE_B/watched.jsonl" ] && break
   sleep 0.5
 done
-kill $WATCH_PID 2>/dev/null; wait $WATCH_PID 2>/dev/null
+kill $WATCH_PID $A_NODE_PID 2>/dev/null; wait $WATCH_PID $A_NODE_PID 2>/dev/null
 [ -f "$CLAUDE_B/watched.jsonl" ] || { cat "$LAB/w.err"; fail "watch did not sync the new file"; }
 # And it must stay quiet while nothing is happening, or an hours-long watch buries
 # the lines that matter under one report per minute.

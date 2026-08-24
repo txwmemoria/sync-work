@@ -19,7 +19,9 @@ pub const ALPN: &[u8] = b"syncwork/1";
 
 /// Bumped on any breaking change to the frames below. Mismatched peers must fail
 /// loudly rather than half-work, since the two machines are upgraded separately.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// v4: clients authenticate by delegation instead of by the machine key.
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Explain a protocol disagreement in terms the operator can act on.
 ///
@@ -30,6 +32,40 @@ pub fn version_mismatch(theirs: u32) -> String {
         "protocol mismatch: peer speaks v{theirs}, this node speaks v{PROTOCOL_VERSION} \
          — update `sw` on one side"
     )
+}
+
+/// Proof that a connection speaks for a paired machine.
+///
+/// Exists because a client must not dial with the machine key. The relay keeps
+/// exactly one active connection per key — a second registration deactivates the
+/// first (measured: `iroh-relay` logs "multiple connections found, deactivating
+/// old connection") — so a client holding the machine key knocks this machine's
+/// *node* off the relay for as long as it runs. A `sw ctx --watch` left running
+/// made the machine undialable for hours; every short-lived command was already
+/// doing the same for seconds at a time.
+///
+/// So a client binds a fresh throwaway key and carries this instead: the machine
+/// key's signature over that throwaway key. The receiver verifies the signature
+/// and authorizes the *machine*, exactly as if the machine key itself had dialled.
+/// The QUIC handshake has already proven the sender holds the throwaway secret,
+/// so the signature cannot be replayed by anyone else — stealing it without the
+/// throwaway's private half buys nothing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Delegation {
+    /// The machine's public key, hex — same form the peer table stores.
+    pub id: String,
+    /// Signature over [`delegation_message`] of the connection's key, hex.
+    pub sig: String,
+}
+
+/// What the machine key signs: a domain tag plus the throwaway public key.
+///
+/// The tag keeps this signature meaningless anywhere else — without it, a bare
+/// 32-byte message could double as some other protocol's signing input.
+pub fn delegation_message(conn_key: &iroh::EndpointId) -> Vec<u8> {
+    let mut msg = b"syncwork-delegation-v1:".to_vec();
+    msg.extend_from_slice(conn_key.as_bytes());
+    msg
 }
 
 /// A request, plus where the machine that sent it can be reached.
@@ -58,6 +94,11 @@ pub struct Envelope {
     /// know yet, in which case the receiver simply learns nothing this time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<String>,
+    /// Who this connection speaks for. `None` only from a peer old enough to
+    /// have dialled with its machine key directly, which the receiver can still
+    /// authorize by the connection key itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<Delegation>,
     #[serde(flatten)]
     pub request: Request,
 }
@@ -247,6 +288,10 @@ mod tests {
     fn an_addressed_request_is_wire_compatible_with_a_bare_one() {
         let addressed = Envelope {
             relay: Some("https://relay.example/".into()),
+            from: Some(Delegation {
+                id: "0".repeat(64),
+                sig: "1".repeat(128),
+            }),
             request: Request::Ping { protocol: 7 },
         };
         let raw = serde_json::to_vec(&addressed).unwrap();
@@ -256,6 +301,7 @@ mod tests {
         assert_eq!(map["t"], "ping");
         assert_eq!(map["protocol"], 7);
         assert_eq!(map["relay"], "https://relay.example/");
+        assert_eq!(map["from"]["id"], "0".repeat(64));
 
         // Forwards: a peer that predates the field ignores it and still reads the
         // request — including the version number it needs to report a mismatch.
@@ -267,6 +313,7 @@ mod tests {
         let old_wire = serde_json::to_vec(&Request::Ping { protocol: 7 }).unwrap();
         let read: Envelope = serde_json::from_slice(&old_wire).unwrap();
         assert!(read.relay.is_none());
+        assert!(read.from.is_none(), "no delegation is absent, not an error");
         assert!(matches!(read.request, Request::Ping { protocol: 7 }));
     }
 
@@ -276,6 +323,7 @@ mod tests {
     fn a_struct_carrying_variant_survives_the_same_round_trip() {
         let addressed = Envelope {
             relay: Some("https://relay.example/".into()),
+            from: None,
             request: Request::Verify(VerifyRequest {
                 protocol: PROTOCOL_VERSION,
                 project: "syncwork".into(),

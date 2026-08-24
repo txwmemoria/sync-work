@@ -11,13 +11,18 @@ use crate::style::Paint;
 use crate::transport;
 use anyhow::{Result, bail};
 
+// Pairing is the one client-side flow on the *machine* endpoint: the ticket
+// carries `ep.id()`, which has to be the key the peer will dial, and coming
+// online is what publishes that key to discovery. The node may get briefly
+// knocked off the relay while this runs — acceptable for a one-time command,
+// where it would not be for `sw ctx --watch`.
 pub async fn run(cmd: PairCmd) -> Result<i32> {
     let mut machine = Machine::load()?;
     let identity = Identity::load_or_create()?;
 
     match cmd {
         PairCmd::Init { name } => {
-            let ticket = transport::with_endpoint(&identity, |ep| {
+            let ticket = transport::with_machine_endpoint(&identity, |ep| {
                 let machine = &machine;
                 async move { transport::local_ticket(&ep, machine, name, None).await }
             })
@@ -43,7 +48,7 @@ pub async fn run(cmd: PairCmd) -> Result<i32> {
             }
 
             let acking = Some(incoming.id.clone());
-            let mine = transport::with_endpoint(&identity, |ep| {
+            let mine = transport::with_machine_endpoint(&identity, |ep| {
                 let machine = &machine;
                 async move { transport::local_ticket(&ep, machine, name, acking).await }
             })

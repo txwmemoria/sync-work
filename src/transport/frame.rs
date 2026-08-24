@@ -65,6 +65,7 @@ pub fn push_json<T: Serialize>(out: &mut Vec<u8>, value: &T) -> Result<()> {
 pub async fn write_request(tx: &mut SendStream, request: super::Request) -> Result<()> {
     let envelope = super::Envelope {
         relay: super::endpoint::self_relay(),
+        from: super::endpoint::delegation(),
         request,
     };
     write_json(tx, &envelope).await
