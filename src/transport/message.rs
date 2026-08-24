@@ -330,7 +330,7 @@ mod tests {
                 recipe: "ci".into(),
                 base: "abc123".into(),
                 patch_bytes: 0,
-                from_host: "niugm-pc".into(),
+                from_host: "win-pc".into(),
                 color: false,
             }),
         };

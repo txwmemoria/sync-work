@@ -25,11 +25,11 @@ Claude Code 的对话记录和记忆存在本地（`~/.claude/` 下），另一�
 
 ## `sw verify` 实际长什么样
 
-下面是真实输出：在 Windows 上敲命令，Mac 编译。
+下面是真实输出（机器名和路径已替换）：在 Windows 上敲命令，Mac 编译。
 
 ```
-verify niugms-macbook-pro-local  ci  f3f2730e553a + 1 file (659 B → 368 B)
-  on niugms-macbook-pro-local (macos) [90e2491]  /Users/niugm/projects/sync-work
+verify mac-mini  ci  f3f2730e553a + 1 file (659 B → 368 B)
+  on mac-mini (macos) [90e2491]  /Users/me/projects/sync-work
   › reusing worktree
   › applying patch
   › [1/2] cargo build --release --all-targets
@@ -38,7 +38,7 @@ error[E0308]: mismatched types
     |
 106 |     let n: i32 = "this is not an integer";
     |            ---   ^^^^^^^^^^^^^^^^^^^^^^^^ expected `i32`, found `&str`
-fail niugms-macbook-pro-local exit 1 in 1.6s (2 errors, 0 warnings)
+fail mac-mini exit 1 in 1.6s (2 errors, 0 warnings)
 ```
 
 三件事值得注意：
@@ -139,8 +139,8 @@ sw verify && sw handoff # 验证通过才交接
 **对端绝不猜。** 它总是 fetch，但只在四个条件全满足时才动检出：请求的分支正是它检出的那个、工作区干净、远端 ref 存在、且是严格快进。任何其他情况都只 fetch 并说明原因：
 
 ```
-  ok niugms-macbook-pro-local fetched master at 938ce0e
-  note the working tree on niugms-macbook-pro-local has uncommitted changes
+  ok mac-mini fetched master at 938ce0e
+  note the working tree on mac-mini has uncommitted changes
 ```
 
 这不是错误 —— commit 已经到了对端，下次 pull 是瞬间的。永不 force，永不 merge，永不碰脏树。push 这一步不做全自动：那是「我决定发布」的决策点，WIP 想验证有 `sw verify`，不需要 push。
@@ -304,16 +304,16 @@ sw doctor
 
 ```
 this machine
-  ✓ identity    20c99aaab5f0044e…
-  ✓ state       C:\Users\sdkpo\.syncwork
+  ✓ identity    0a1b2c3d4e5f6071…
+  ✓ state       C:\Users\me\.syncwork
   ✓ build       0f3d4b0
   ✓ address     https://aps1-1.relay.n0.iroh.link./
   ✓ node        running
   ✓ autostart   registered
 
 peers
-  ✓ niugms-macbook-pro-local  reachable
-      relay aps1-1.relay.n0.iroh.link. [5.223.65.62] 357ms, *ip:10.209.21.106:55042 6ms
+  ✓ mac-mini  reachable
+      relay aps1-1.relay.n0.iroh.link. [5.223.65.62] 357ms, *ip:10.0.0.23:55042 6ms
   ✓ address     https://aps1-1.relay.n0.iroh.link./ (cached)
   ✓ keys        agree (the peer accepted this machine's key)
   ✓ build       0f3d4b0 on both

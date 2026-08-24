@@ -141,12 +141,12 @@ mod tests {
             "D--projects-sync-work"
         );
         assert_eq!(
-            encode_project_dir(Path::new(r"C:\Users\sdkpo")),
-            "C--Users-sdkpo"
+            encode_project_dir(Path::new(r"C:\Users\dev")),
+            "C--Users-dev"
         );
         assert_eq!(
-            encode_project_dir(Path::new(r"C:\Users\sdkpo\AppData\Roaming\Beem\logs")),
-            "C--Users-sdkpo-AppData-Roaming-Beem-logs"
+            encode_project_dir(Path::new(r"C:\Users\dev\AppData\Roaming\Some App\logs")),
+            "C--Users-dev-AppData-Roaming-Some-App-logs"
         );
         // The POSIX form a Mac would produce keeps its leading separator.
         assert_eq!(
