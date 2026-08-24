@@ -382,6 +382,8 @@ peers
 
 **`could not reach peer ...; is 'sw node' running there?`** —— 有地址但连不上：对端节点没在跑，或网络不通。`SW_LOG=debug sw status` 看握手细节。
 
+**日志里 `served via` 怎么读** —— 列出的是这条连接的全部路径，`*` 标记实际选中的那条。每条新连接都从 relay 起步、几百毫秒后打洞切直连，所以连接上的**第一个**小请求（如 ctx 的 manifest）常显示 `*relay` —— 这不是直连失败，看同一连接后续的请求：搬数据的 push / fetch / verify 应该都是 `*ip:... 几毫秒`。
+
 **两个 shell 报告不同的 `id`** —— `sw pair list` 会打印实际使用的状态目录，先对比这个。配对要在你日常使用的那个 shell 里做。
 
 想从零重来：`sw reset`（`--yes` 跳过确认）。只删本机自己的东西 —— 不碰仓库的 `syncwork.toml`、`.sw/` 缓存、`~/.claude`。删除前列出将失去什么，并提醒本机换新身份后**两边都要重新配对**。
