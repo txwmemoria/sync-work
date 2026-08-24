@@ -24,22 +24,32 @@ use std::str::FromStr;
 /// Deliberately private: [`with_endpoint`] and [`with_machine_endpoint`] are the
 /// only ways to obtain one, which makes it impossible for a caller to skip the
 /// close.
-async fn bind(secret: iroh::SecretKey) -> Result<Endpoint> {
+async fn bind(secret: iroh::SecretKey, advertise_on_lan: bool) -> Result<Endpoint> {
+    // mDNS rides alongside the preset's relay and DNS lookups, it does not
+    // replace them: on a shared LAN the two machines find each other by
+    // multicast — no relay, no public DNS, and the ~160ms relay bootstrap
+    // disappears from every dial — while off-LAN it quietly finds nothing and
+    // the existing paths carry on unchanged.
+    //
+    // Only the machine endpoint advertises. A client's throwaway key is dialled
+    // by nobody, so announcing it would just spam the neighbourhood's mDNS.
+    let mdns = iroh_mdns_address_lookup::MdnsAddressLookup::builder().advertise(advertise_on_lan);
     let ep = Endpoint::builder(presets::N0)
         .secret_key(secret)
         .alpns(vec![ALPN.to_vec()])
+        .address_lookup(mdns)
         .bind()
         .await
         .context("failed to bind iroh endpoint")?;
     Ok(ep)
 }
 
-async fn with_bound<T, F, Fut>(secret: iroh::SecretKey, f: F) -> Result<T>
+async fn with_bound<T, F, Fut>(secret: iroh::SecretKey, advertise_on_lan: bool, f: F) -> Result<T>
 where
     F: FnOnce(Endpoint) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    let ep = bind(secret).await?;
+    let ep = bind(secret, advertise_on_lan).await?;
     // Endpoint is a cheap handle; the clone lets `f` own one while this scope
     // keeps the one it closes.
     let out = f(ep.clone()).await;
@@ -70,7 +80,7 @@ where
     if let Ok(mut slot) = DELEGATION.lock() {
         *slot = Some(delegation);
     }
-    with_bound(secret, f).await
+    with_bound(secret, false, f).await
 }
 
 /// Bind the endpoint that *is* this machine: the node, and pairing.
@@ -83,7 +93,7 @@ where
     F: FnOnce(Endpoint) -> Fut,
     Fut: std::future::Future<Output = Result<T>>,
 {
-    with_bound(identity.secret.clone(), f).await
+    with_bound(identity.secret.clone(), true, f).await
 }
 
 /// This process's delegation, set when its client endpoint is created.

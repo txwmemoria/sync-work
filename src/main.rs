@@ -124,8 +124,13 @@ fn main() {
         // out: a tracing target defaults to `module_path!()`, whose root is
         // the *binary* name (`sw`), not the package name (`syncwork`).
         // Hard-coding the package name silently dropped every info event.
+        //
+        // And `sw::`, not `sw`: EnvFilter matches targets by *string* prefix, so
+        // a bare `sw` also matched the `swarm_discovery` dependency and let its
+        // INFO chatter into every command's output. The trailing `::` pins the
+        // match to our own modules — every event this crate emits lives under one.
         tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
-            .unwrap_or_else(|_| format!("error,{}=info", env!("CARGO_CRATE_NAME")).into()),
+            .unwrap_or_else(|_| format!("error,{}::=info", env!("CARGO_CRATE_NAME")).into()),
     );
     // Escape codes are for terminals and nowhere else. `tracing-subscriber` colours
     // its output whenever the feature is compiled in, without looking at where that
