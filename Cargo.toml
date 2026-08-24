@@ -17,6 +17,9 @@ clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
+# For CLI edits to an existing syncwork.toml. serde round-tripping would discard
+# the user's comments and ordering; toml_edit preserves them.
+toml_edit = "0.23"
 anyhow = "1"
 thiserror = "2"
 directories = "6"

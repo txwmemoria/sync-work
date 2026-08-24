@@ -3,6 +3,7 @@
 //! The two commands with a peer on the other end (`verify`, `ctx`) live with
 //! their protocol halves instead; what remains here is local bookkeeping.
 
+pub mod configure;
 pub mod doctor;
 pub mod hook;
 pub mod pair;
@@ -64,9 +65,22 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
         }
 
         // ---------------------------------------------- repository-scoped
-        Command::Init { name } => {
+        Command::Init {
+            name,
+            remote,
+            template,
+            yes,
+        } => {
             let repo = discover(&cli.repo).await?;
-            project::init(&repo, name).await
+            configure::init(&repo, name, remote, template, yes).await
+        }
+        Command::Recipe { cmd } => {
+            let repo = discover(&cli.repo).await?;
+            configure::recipe(&repo, cmd)
+        }
+        Command::Root { cmd } => {
+            let repo = discover(&cli.repo).await?;
+            configure::root(&repo, cmd)
         }
         Command::Link => {
             let repo = discover(&cli.repo).await?;

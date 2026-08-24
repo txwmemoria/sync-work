@@ -91,6 +91,20 @@ impl Recipe {
 
 // ---------------------------------------------------------------- root
 
+/// Starter recipe sets for `sw init`.
+///
+/// The tool itself is ecosystem-agnostic — a recipe step is any shell command —
+/// so all a template does is spare the first edit. `ci` is defined in every one,
+/// because that is what a bare `sw verify` runs.
+#[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum Template {
+    Rust,
+    Node,
+    Python,
+    Go,
+    Blank,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Project {
     pub name: String,
@@ -236,37 +250,52 @@ impl Config {
         Ok(r.resolve(name, platform))
     }
 
-    pub fn template(project: &str) -> Self {
+    pub fn template(project: &str, remote: Option<&str>, kind: Template) -> Self {
+        fn recipe(steps: &[&str]) -> Recipe {
+            Recipe {
+                steps: steps.iter().map(|s| s.to_string()).collect(),
+                cargo_json: true,
+                env: BTreeMap::new(),
+                windows: None,
+                macos: None,
+                linux: None,
+            }
+        }
         let mut recipes = BTreeMap::new();
-        recipes.insert(
-            "ci".to_string(),
-            Recipe {
-                steps: vec![
-                    "cargo build --release --all-targets".into(),
-                    "cargo test --all".into(),
-                ],
-                cargo_json: true,
-                env: BTreeMap::new(),
-                windows: None,
-                macos: None,
-                linux: None,
-            },
-        );
-        recipes.insert(
-            "check".to_string(),
-            Recipe {
-                steps: vec!["cargo clippy --all-targets -- -D warnings".into()],
-                cargo_json: true,
-                env: BTreeMap::new(),
-                windows: None,
-                macos: None,
-                linux: None,
-            },
-        );
+        // `ci` is what a bare `sw verify` runs, so every template defines it;
+        // `check` is the conventional fast gate where the ecosystem has one.
+        match kind {
+            Template::Rust => {
+                recipes.insert(
+                    "ci".into(),
+                    recipe(&["cargo build --release --all-targets", "cargo test --all"]),
+                );
+                recipes.insert(
+                    "check".into(),
+                    recipe(&["cargo clippy --all-targets -- -D warnings"]),
+                );
+            }
+            Template::Node => {
+                recipes.insert("ci".into(), recipe(&["npm ci", "npm test"]));
+            }
+            Template::Python => {
+                recipes.insert("ci".into(), recipe(&["pytest"]));
+            }
+            Template::Go => {
+                recipes.insert("ci".into(), recipe(&["go build ./...", "go test ./..."]));
+                recipes.insert("check".into(), recipe(&["go vet ./..."]));
+            }
+            Template::Blank => {
+                recipes.insert(
+                    "ci".into(),
+                    recipe(&["echo replace me: this recipe runs on the peer"]),
+                );
+            }
+        }
         Config {
             project: Project {
                 name: project.to_string(),
-                remote: default_remote(),
+                remote: remote.map(str::to_string).unwrap_or_else(default_remote),
             },
             recipes,
             context: ContextConfig::default(),

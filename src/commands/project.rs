@@ -4,41 +4,10 @@
 //! records "project name -> path on *this* machine", which is exactly the mapping
 //! that cannot be committed, because the two machines disagree on it.
 
-use crate::config::{self, Config, Machine};
-use crate::git;
+use crate::config::{self, Machine};
 use crate::style::Paint;
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::path::Path;
-
-pub async fn init(repo: &Path, name: Option<String>) -> Result<i32> {
-    let name = match name {
-        Some(n) => n,
-        None => repo
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| "project".into()),
-    };
-    let path = repo.join(config::CONFIG_FILE);
-    if path.exists() {
-        bail!("{} already exists", path.display());
-    }
-    Config::template(&name).save(repo)?;
-    git::ensure_ignored(repo, config::STATE_DIR_IGNORE).await?;
-    link(repo, &name, false)?;
-
-    println!("{} {}", "created".green().bold(), path.display());
-    println!("  added .sw/ to .gitignore");
-    println!();
-    println!(
-        "{}",
-        "Commit syncwork.toml, then in your clone on the other machine:".bold()
-    );
-    println!("  {}", "sw link".cyan());
-    println!();
-    println!("If the machines are not paired yet, do that once — from anywhere:");
-    println!("  {}", "sw pair init".cyan());
-    Ok(0)
-}
 
 /// Record where this project lives on this machine.
 ///

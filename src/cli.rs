@@ -46,10 +46,33 @@ pub enum ColorWhen {
 #[derive(Subcommand)]
 pub enum Command {
     /// Write a starter syncwork.toml into this repo and register it.
+    ///
+    /// Asks for anything not given by a flag, one question at a time — but only
+    /// on a terminal. Piped or scripted runs take the defaults silently, so no
+    /// automation can hang on a prompt.
     Init {
         /// Project name; defaults to the repository directory name.
         #[arg(long)]
         name: Option<String>,
+        /// Git remote the peer fetches missing commits from.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Starter recipes to write.
+        #[arg(long, value_enum)]
+        template: Option<crate::config::Template>,
+        /// Take the defaults for anything not given, without asking.
+        #[arg(long, short = 'y')]
+        yes: bool,
+    },
+    /// List, add or remove recipes in syncwork.toml.
+    Recipe {
+        #[command(subcommand)]
+        cmd: Option<RecipeCmd>,
+    },
+    /// List, add or remove context roots in syncwork.toml.
+    Root {
+        #[command(subcommand)]
+        cmd: Option<RootCmd>,
     },
     /// Register this checkout so the node here can serve it.
     Link,
@@ -143,6 +166,51 @@ pub enum Command {
     /// Run `sw ctx` automatically when a Claude Code session ends.
     #[command(subcommand)]
     Hook(HookCmd),
+}
+
+#[derive(Subcommand)]
+pub enum RecipeCmd {
+    /// Show every recipe and its steps (the default).
+    List,
+    /// Add a recipe, or replace one that exists. Each STEP is one shell command.
+    ///
+    /// With --platform, sets that platform's override on an existing recipe
+    /// instead of the base steps.
+    Add {
+        name: String,
+        /// Shell commands, run in order on the peer. Quote each one.
+        #[arg(required = true)]
+        steps: Vec<String>,
+        /// Environment for the steps, as KEY=VALUE. Repeatable.
+        #[arg(long, value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Override steps for one platform only (windows / macos / linux).
+        #[arg(long)]
+        platform: Option<String>,
+    },
+    /// Remove a recipe.
+    Remove { name: String },
+}
+
+#[derive(Subcommand)]
+pub enum RootCmd {
+    /// Show every context root and where it resolves on this machine (the default).
+    List,
+    /// Declare a context root to sync.
+    Add {
+        name: String,
+        /// claude-project, home, or repo.
+        #[arg(long)]
+        kind: String,
+        /// For home/repo kinds: the relative path.
+        #[arg(long)]
+        path: Option<String>,
+        /// For the home kind: environment variable that overrides the base.
+        #[arg(long)]
+        env: Option<String>,
+    },
+    /// Remove a context root.
+    Remove { name: String },
 }
 
 #[derive(Subcommand)]

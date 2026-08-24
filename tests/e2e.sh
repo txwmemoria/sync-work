@@ -174,6 +174,22 @@ for name in widget gadget; do
 done
 echo "PASS both projects verified"
 
+step "a recipe added from the CLI runs by name — after it reaches the peer"
+# `sw recipe add` writes the config; the peer executes ITS OWN copy of the
+# recipe list (a patch cannot inject commands), so the new recipe must be
+# committed and pulled before `sw verify hello` can find it there. This step
+# locks in both halves: the CLI edit, and the documented propagation rule.
+a "A/widget" recipe add hello "echo hello-from-recipe" > /dev/null 2>&1 || fail "recipe add"
+a "A/widget" recipe | grep -q "hello-from-recipe" || fail "recipe list does not show it"
+(cd "A/widget" && git add syncwork.toml && git commit --quiet -m "add hello recipe" \
+   && git push --quiet origin HEAD)
+(cd "B/widget" && git pull --quiet)
+a "A/widget" verify hello > "$LAB/hello.out" 2> "$LAB/hello.err" \
+  || { cat "$LAB/hello.err"; fail "verify hello failed"; }
+grep -q "hello-from-recipe" "$LAB/hello.out" "$LAB/hello.err" 2>/dev/null \
+  || { cat "$LAB/hello.err"; fail "recipe output did not come back"; }
+echo "PASS CLI-added recipe ran on the peer"
+
 # ------------------------------------- uncommitted error fails with diagnostic
 step "the node records each request it served"
 # The node streams stages and build output to the *requester*, so its own log is

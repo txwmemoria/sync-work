@@ -97,8 +97,8 @@ sw service install
 ```bash
 # 机器 A，在项目里
 cd ~/projects/myapp
-sw init             # 生成 syncwork.toml，把 .sw/ 加进 .gitignore
-# 按需改配方（见「syncwork.toml 参考」），提交
+sw init             # 逐项询问：项目名、远端、起手配方（rust/node/python/go/blank）
+# 按需再调配方（sw recipe，或直接改文件），提交 syncwork.toml
 
 # 机器 B，在同一项目的本地克隆里
 cd ~/code/myapp && git pull
@@ -194,7 +194,31 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 
 ## syncwork.toml 参考
 
-**每个仓库一份**，放在仓库根目录、提交进 git，两台机器读到同一份 —— 这是「双端执行相同配方」的保证。多项目不是在一份文件里写多个 `[project]`，而是每个仓库各写各的；名字对路径的映射在机器注册表里，由 `sw link` 维护。完整示例：
+**每个仓库一份**，放在仓库根目录、提交进 git，两台机器读到同一份 —— 这是「双端执行相同配方」的保证。多项目不是在一份文件里写多个 `[project]`，而是每个仓库各写各的；名字对路径的映射在机器注册表里，由 `sw link` 维护。
+
+先分清**哪些是固定结构、哪些随便你定**：
+
+| 键 | 性质 |
+|---|---|
+| `[project]` 的 `name` / `remote` | 固定键名，值你定。`name` 是两台机器认项目的凭据，改了两边要一起改 |
+| `[recipes.<名字>]` | **名字和数量完全自由**。`ci` 只是 `sw verify` 不带参数时的默认名，没有别的特殊性；每个配方里 `steps`（必填）、`env`、`cargo_json`、平台覆盖块是固定键名 |
+| `[context]` 的 `quiet_secs` | 固定键名，值可调（默认 5 秒） |
+| `[context.roots.<名字>]` | **名字和数量完全自由**；每个根里 `kind`（必填：三选一）、`path`、`env` 是固定键名 |
+
+不想手改文件的话，全部可以用命令一步步搭：
+
+```bash
+sw init                                      # 向导：逐项询问（脚本里跑则静默取默认值）
+sw recipe                                    # 列出所有配方
+sw recipe add e2e "bash tests/e2e.sh"        # 加一个（同名即覆盖），跑法：sw verify e2e
+sw recipe add ci "cargo test" --platform windows   # 给已有配方加平台覆盖
+sw recipe remove e2e
+sw root                                      # 列出上下文根，并显示各自在本机指向哪
+sw root add notes --kind repo --path docs/ai
+sw root remove notes
+```
+
+这些命令用保留注释的方式改文件 —— 你手写的注释和排版不会被冲掉，改完还会先校验再落盘。完整示例：
 
 ```toml
 [project]
