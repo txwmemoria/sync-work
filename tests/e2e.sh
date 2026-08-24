@@ -130,6 +130,16 @@ done
 grep -q "waiting for requests" "$LAB/node.log" || { cat "$LAB/node.log"; fail "node did not start"; }
 grep -q "widget" "$LAB/node.log" || fail "node does not know about widget"
 grep -q "gadget" "$LAB/node.log" || fail "node does not know about gadget"
+# Timestamps must carry a zone offset, i.e. they are local rather than UTC. This
+# is a real regression guard, not decoration: reading the machine's timezone is
+# only permitted while the process is single-threaded, so restoring
+# `#[tokio::main]` — whose worker threads start before the body runs — makes the
+# offset lookup fail *silently* and the log falls back to UTC on Unix while still
+# working on Windows. Matching the format catches that; `+00:00` passes, since the
+# question is whether the zone is known, not which zone it is.
+grep -qE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}[+-][0-9]{2}:[0-9]{2} ' \
+  "$LAB/node.log" \
+  || { head -3 "$LAB/node.log"; fail "log timestamps are not local time with an offset"; }
 echo ok
 
 step "sw status works from outside a repo and reports both projects"
@@ -261,8 +271,10 @@ step "handoff: reports when a different branch is checked out there"
 (cd "B/widget" && git reset --quiet HEAD LOCAL_SCRATCH.txt && rm -f LOCAL_SCRATCH.txt)
 (cd "B/widget" && git switch --quiet -c sidetrack)
 a "A/widget" handoff > "$LAB/h3.out" 2> "$LAB/h3.err" || { cat "$LAB/h3.err"; fail "handoff"; }
-grep -q "is checked out here" "$LAB/h3.err" \
-  || { cat "$LAB/h3.err"; fail "did not name the branch mismatch"; }
+# Named, and named as being on the *other* machine: this text is composed there
+# and printed here, so "here" would send you to check the wrong checkout.
+grep -q "is checked out on node-b" "$LAB/h3.err" \
+  || { cat "$LAB/h3.err"; fail "did not name the branch mismatch, and whose it is"; }
 echo "PASS branch mismatch reported"
 
 # ================================================================ sw ctx

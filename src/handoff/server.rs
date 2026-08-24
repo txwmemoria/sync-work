@@ -38,6 +38,12 @@ pub async fn handle(project: &str, branch: &str) -> HandoffResult {
     }
 }
 
+/// Every `why` below is composed here and read *there* — printed on the machine
+/// that asked, under a line naming this one. So it says `on <host>`, never "here":
+/// real use turned up `the working tree here has uncommitted changes` printed in a
+/// Windows shell about a Mac's tree, which sends you to check the wrong machine.
+/// Same reason [`Machine::resolve_project`](crate::config::Machine::resolve_project)
+/// phrases its errors for the far reader.
 async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Result<HandoffResult> {
     git::fetch(repo, remote).await?;
 
@@ -47,7 +53,7 @@ async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Res
             host: host.into(),
             branch: branch.into(),
             at: "-".into(),
-            why: format!("`{target}` does not exist here even after fetching"),
+            why: format!("`{target}` does not exist on {host}, even after fetching"),
         });
     }
     let at = git::short_rev(repo, &target).await;
@@ -61,7 +67,7 @@ async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Res
                 host: host.into(),
                 branch: branch.into(),
                 at,
-                why: "HEAD is detached here".into(),
+                why: format!("HEAD is detached on {host}"),
             });
         }
     };
@@ -70,7 +76,7 @@ async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Res
             host: host.into(),
             branch: branch.into(),
             at,
-            why: format!("`{current}` is checked out here, not `{branch}`"),
+            why: format!("`{current}` is checked out on {host}, not `{branch}`"),
         });
     }
     if git::is_dirty(repo).await? {
@@ -78,7 +84,7 @@ async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Res
             host: host.into(),
             branch: branch.into(),
             at,
-            why: "the working tree here has uncommitted changes".into(),
+            why: format!("the working tree on {host} has uncommitted changes"),
         });
     }
 
@@ -98,7 +104,7 @@ async fn run(repo: &Path, remote: &str, branch: &str, host: &str) -> anyhow::Res
             host: host.into(),
             branch: branch.into(),
             at,
-            why: format!("local `{branch}` at {from} has diverged; not a fast-forward"),
+            why: format!("`{branch}` on {host} is at {from} and has diverged; not a fast-forward"),
         });
     }
 

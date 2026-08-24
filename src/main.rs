@@ -54,8 +54,38 @@ fn open_log(path: &std::path::Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
-#[tokio::main]
-async fn main() {
+/// A timestamp formatter in the machine's own timezone, with its offset shown.
+///
+/// The log is read by a person, next to a clock — a node log stamped in UTC has to
+/// be mentally converted every time, and correlating "this is when I hit ctrl-c"
+/// with a line in the peer's log is the whole reason the timestamps are there. The
+/// offset is kept in the output (`+08:00`) so a line pasted into a message is still
+/// unambiguous.
+///
+/// This must run before the async runtime exists, which is why `main` builds that
+/// runtime by hand instead of using `#[tokio::main]`. Reading the local zone is
+/// only sound in a single-threaded process — another thread could be in `setenv`
+/// while `localtime_r` reads the environment — so the `time` crate refuses once the
+/// process is multi-threaded, and tokio's worker threads are already running by the
+/// time an `#[tokio::main]` body starts. That refusal is silent: it looks exactly
+/// like "local time is not supported here", and the log stays UTC on macOS and
+/// Linux while working on Windows.
+fn local_timer()
+-> Option<tracing_subscriber::fmt::time::OffsetTime<impl time::formatting::Formattable>> {
+    let offset = time::UtcOffset::current_local_offset().ok()?;
+    Some(tracing_subscriber::fmt::time::OffsetTime::new(
+        offset,
+        time::macros::format_description!(
+            "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:3][offset_hour \
+             sign:mandatory]:[offset_minute]"
+        ),
+    ))
+}
+
+fn main() {
+    // First, before any thread exists. See `local_timer`.
+    let timer = local_timer();
+
     // Parsed before the subscriber is built, because `sw node --log` decides where
     // the log goes and clap is the only thing that knows.
     let cli = cli::Cli::parse();
@@ -96,11 +126,21 @@ async fn main() {
         tracing_subscriber::EnvFilter::try_from_env("SW_LOG")
             .unwrap_or_else(|_| format!("error,{}=info", env!("CARGO_CRATE_NAME")).into()),
     );
-    // Escape codes are for terminals: a log file must stay greppable, and this
-    // one is read with `sw service logs` and by whoever is diagnosing a node.
-    match log_file {
-        Some(file) => builder.with_writer(file).with_ansi(false).init(),
-        None => builder.with_writer(std::io::stderr).init(),
+    // Escape codes are for terminals and nowhere else. `tracing-subscriber` colours
+    // its output whenever the feature is compiled in, without looking at where that
+    // output goes — so every redirected node log was carrying escapes: launchd's on
+    // macOS, systemd's, and the shell-redirected one the tests read. A log is
+    // grepped, so this follows the same rule as the rest of our output.
+    //
+    // A missing timer falls back to the default UTC one: a machine whose timezone
+    // cannot be read should still log with timestamps.
+    let ansi = log_file.is_none() && style::detect();
+    let builder = builder.with_ansi(ansi);
+    match (log_file, timer) {
+        (Some(file), Some(t)) => builder.with_writer(file).with_timer(t).init(),
+        (Some(file), None) => builder.with_writer(file).init(),
+        (None, Some(t)) => builder.with_writer(std::io::stderr).with_timer(t).init(),
+        (None, None) => builder.with_writer(std::io::stderr).init(),
     }
 
     // Applied before anything is printed, so `--color` covers the whole run,
@@ -110,7 +150,23 @@ async fn main() {
         cli::ColorWhen::Never => false,
         cli::ColorWhen::Auto => style::detect(),
     });
-    match commands::dispatch(cli).await {
+
+    // Built here rather than by `#[tokio::main]` so that reading the local
+    // timezone above happens while this process is still single-threaded.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!(
+                "{} could not start the async runtime: {e}",
+                "error:".red().bold()
+            );
+            std::process::exit(2);
+        }
+    };
+    match runtime.block_on(commands::dispatch(cli)) {
         // A non-zero code here is the peer's build result, propagated verbatim so
         // `sw verify && ...` and agent-driven retry loops behave correctly.
         Ok(code) => std::process::exit(code),
