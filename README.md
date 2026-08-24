@@ -257,17 +257,19 @@ path = "docs/ai-notes"
 ### 一次 verify 的完整流程
 
 ```
-        Windows                                        Mac
-┌────────────────────────┐                  ┌────────────────────────┐
-│ sw verify (在 myapp 里) │                  │ sw node (每台机器一个)  │
-│  1 扫描工作区           │                  │                        │
-│    临时 index，不碰你的  │                  │  2 查注册表：           │
-│    暂存区               │                  │    myapp -> ~/code/myapp│
-│  2 diff → zstd  ────────┼──── iroh QUIC ──▶│  3 checkout base       │
-│    + 项目名             │    公钥认证/加密   │    git apply patch     │
-│                        │                  │  4 跑配方              │
-│  6 日志/诊断/退出码 ◀───┼─── 流式事件 ──────┤  5 .sw/wt/<peer>/       │
-└────────────────────────┘                  └────────────────────────┘
+        Windows                                       Mac
++--------------------------+                 +--------------------------+
+| sw verify  (in myapp)    |                 | sw node  (one / machine) |
+|                          |                 |                          |
+| 1 snapshot the worktree  |                 | 3 look up the registry:  |
+|   (temp index; staging   |    iroh QUIC    |   myapp -> ~/code/myapp  |
+|   area never touched)    |   pubkey auth,  | 4 checkout base,         |
+| 2 diff -> zstd ----------+---encrypted---->|   apply the patch        |
+|   + project name         |                 | 5 run the recipe in      |
+|                          |                 |   .sw/wt/<peer>/         |
+| 7 logs, diagnostics, <---+-----------------+ 6 stream every event     |
+|   exit code              |                 |                          |
++--------------------------+                 +--------------------------+
 ```
 
 **快照走临时 index**，绝不碰你真实的暂存区。**worktree 复用而不是每次重建**：对端在 `<仓库>/.sw/wt/<peer>/` 保留一个常驻 worktree，`target/` 缓存因此留得住 —— 1.6 秒就是这么来的；清理用 `git clean -fd`（特意没有 `-x`）。**对端缺 base commit 时自动回退**：它先 fetch，还是没有就回报，客户端改用与远端的公共祖先重新打一个更大的 patch 发过去 —— 所以只存在于本地的 commit 也不用先 push。**路径从不进网络**：请求里只有项目名，对端查自己的注册表、再核对项目名没错位；对端发来的相对路径逐段校验，出不了根目录。
