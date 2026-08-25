@@ -4,7 +4,7 @@ name = "syncwork"
 # has never seen it; ordinary verification does not touch the remote.
 remote = "origin"
 
-[recipes.ci]
+[recipes.verify]
 steps = [
     "cargo build --release --all-targets",
     "cargo test --all",

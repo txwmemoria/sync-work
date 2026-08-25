@@ -94,8 +94,9 @@ impl Recipe {
 /// Starter recipe sets for `sw init`.
 ///
 /// The tool itself is ecosystem-agnostic — a recipe step is any shell command —
-/// so all a template does is spare the first edit. `ci` is defined in every one,
-/// because that is what a bare `sw verify` runs.
+/// so all a template does is spare the first edit. `verify` is defined in every
+/// one, because that is what a bare `sw verify` runs: the command and its
+/// default recipe share a name, so there is no mapping to memorize.
 #[derive(Debug, Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Template {
     Rust,
@@ -262,12 +263,13 @@ impl Config {
             }
         }
         let mut recipes = BTreeMap::new();
-        // `ci` is what a bare `sw verify` runs, so every template defines it;
-        // `check` is the conventional fast gate where the ecosystem has one.
+        // `verify` is what a bare `sw verify` runs — the command and the recipe
+        // share one name so there is no default to memorize. `check` is the
+        // conventional fast gate where the ecosystem has one.
         match kind {
             Template::Rust => {
                 recipes.insert(
-                    "ci".into(),
+                    "verify".into(),
                     recipe(&["cargo build --release --all-targets", "cargo test --all"]),
                 );
                 recipes.insert(
@@ -276,18 +278,21 @@ impl Config {
                 );
             }
             Template::Node => {
-                recipes.insert("ci".into(), recipe(&["npm ci", "npm test"]));
+                recipes.insert("verify".into(), recipe(&["npm ci", "npm test"]));
             }
             Template::Python => {
-                recipes.insert("ci".into(), recipe(&["pytest"]));
+                recipes.insert("verify".into(), recipe(&["pytest"]));
             }
             Template::Go => {
-                recipes.insert("ci".into(), recipe(&["go build ./...", "go test ./..."]));
+                recipes.insert(
+                    "verify".into(),
+                    recipe(&["go build ./...", "go test ./..."]),
+                );
                 recipes.insert("check".into(), recipe(&["go vet ./..."]));
             }
             Template::Blank => {
                 recipes.insert(
-                    "ci".into(),
+                    "verify".into(),
                     recipe(&["echo replace me: this recipe runs on the peer"]),
                 );
             }

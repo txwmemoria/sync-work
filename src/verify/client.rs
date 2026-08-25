@@ -16,7 +16,8 @@ use std::path::Path;
 use std::time::Instant;
 
 pub struct Options {
-    pub recipe: String,
+    /// `None` means the recipe named like the command itself: `verify`.
+    pub recipe: Option<String>,
     pub peer: Option<String>,
     pub base: Option<String>,
     /// Push the current branch before verifying. Off by default — the point of
@@ -80,8 +81,11 @@ async fn attempts(
     base: &str,
     opts: &Options,
 ) -> Result<i32> {
+    // The command and its default recipe share a name: a bare `sw verify` runs
+    // the recipe called `verify`. One rule, no mapping to memorize.
+    let recipe = opts.recipe.as_deref().unwrap_or("verify");
     // First attempt against HEAD keeps the patch as small as possible.
-    match attempt(repo, cfg, conn, base, &opts.recipe, peer_name).await? {
+    match attempt(repo, cfg, conn, base, recipe, peer_name).await? {
         Outcome::Done(code) => Ok(code),
         Outcome::Failed(msg) => bail!("{msg}"),
         Outcome::MissingBase(missing) => {
@@ -101,7 +105,7 @@ async fn attempts(
                 missing,
                 fallback
             );
-            match attempt(repo, cfg, conn, &fallback, &opts.recipe, peer_name).await? {
+            match attempt(repo, cfg, conn, &fallback, recipe, peer_name).await? {
                 Outcome::Done(code) => Ok(code),
                 Outcome::Failed(msg) => bail!("{msg}"),
                 Outcome::MissingBase(b) => bail!(

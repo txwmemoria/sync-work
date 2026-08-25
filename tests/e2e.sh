@@ -168,7 +168,7 @@ echo ok
 # ------------------------------------------------- one node, two projects
 step "verify BOTH projects over the single node and single pairing"
 for name in widget gadget; do
-  a "A/$name" verify ci > "$LAB/$name.out" 2> "$LAB/$name.err"
+  a "A/$name" verify > "$LAB/$name.out" 2> "$LAB/$name.err"
   [ $? -eq 0 ] || { tail -20 "$LAB/$name.err"; fail "$name verify did not return 0"; }
   grep -q "B/$name" "$LAB/$name.err" || { cat "$LAB/$name.err"; fail "$name built in the wrong checkout"; }
 done
@@ -196,7 +196,7 @@ step "the node records each request it served"
 # the only place the operator can see that a request arrived at all. Nothing else
 # in this suite covers it: the banner is eprintln, the request lines are tracing,
 # and only the banner was ever asserted on.
-grep -q "verify widget/ci" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the request"; }
+grep -q "verify widget/verify" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the request"; }
 grep -q -- "-> exit 0" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log has no record of the outcome"; }
 # The path must be reported after the work, not at connect time: a connection is
 # always relayed at the moment it opens, so sampling it there would claim every
@@ -228,7 +228,7 @@ cat > "A/widget/src/lib.rs" <<'EOF'
 pub fn add(a: i32, b: i32) -> i32 { a + b }
 pub fn broken() -> String { let x: i32 = "not an int"; x.to_string() }
 EOF
-a "A/widget" verify ci > "$LAB/v2.out" 2> "$LAB/v2.err"
+a "A/widget" verify > "$LAB/v2.out" 2> "$LAB/v2.err"
 RC=$?
 [ $RC -ne 0 ] || fail "expected non-zero exit for a broken build"
 grep -q "E0308\|mismatched types" "$LAB/v2.err" || fail "no compiler diagnostic came back"
@@ -248,13 +248,13 @@ echo "PASS isolation holds, across projects too"
 
 step "fix and re-verify"
 printf 'pub fn add(a: i32, b: i32) -> i32 { a + b }\n' > "A/widget/src/lib.rs"
-a "A/widget" verify ci > "$LAB/v4.out" 2> "$LAB/v4.err"
+a "A/widget" verify > "$LAB/v4.out" 2> "$LAB/v4.err"
 [ $? -eq 0 ] || { tail -20 "$LAB/v4.err"; fail "fixed verify failed"; }
 echo "PASS exit 0"
 
 step "an unlinked project on the peer gives an actionable error"
 b "$LAB" unlink gadget > /dev/null || fail "unlink"
-a "A/gadget" verify ci > "$LAB/v5.out" 2> "$LAB/v5.err"
+a "A/gadget" verify > "$LAB/v5.out" 2> "$LAB/v5.err"
 RC=$?
 [ $RC -ne 0 ] || fail "verify should fail when the peer has not linked the project"
 grep -q "not linked on node-b" "$LAB/v5.err" \

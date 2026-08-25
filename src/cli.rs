@@ -110,9 +110,9 @@ pub enum Command {
     },
     /// Build the current working tree on the peer and report the result here.
     Verify {
-        /// Recipe from syncwork.toml.
-        #[arg(default_value = "ci")]
-        recipe: String,
+        /// Recipe from syncwork.toml. Defaults to the one named `verify`
+        /// (or `ci`, the name older configs used).
+        recipe: Option<String>,
         /// Target peer; optional when exactly one machine is paired.
         #[arg(long)]
         peer: Option<String>,

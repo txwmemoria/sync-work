@@ -178,7 +178,7 @@ pub fn recipe(repo: &Path, cmd: Option<RecipeCmd>) -> Result<i32> {
         RecipeCmd::List => {
             let cfg = Config::load(repo)?;
             if cfg.recipes.is_empty() {
-                println!("no recipes — add one: sw recipe add ci \"cargo test\"");
+                println!("no recipes — add one: sw recipe add verify \"cargo test\"");
                 return Ok(0);
             }
             for (name, r) in &cfg.recipes {

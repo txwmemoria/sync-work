@@ -121,8 +121,8 @@ sw unlink myapp     # 取消注册
 ### `sw verify` —— 在对端验证当前工作区
 
 ```bash
-sw verify              # 默认配方 ci
-sw verify check        # 换配方
+sw verify              # 跑名为 verify 的配方（命令即配方名）
+sw verify check        # 换配方 —— sw verify <名字> 跑 [recipes.<名字>]
 sw verify --base HEAD~3   # 换基准 commit
 sw verify --peer mac   # 超过两台机器时指定目标
 sw verify --push       # 顺手把分支推到远端（通常不需要）
@@ -208,13 +208,13 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 
 ```
 [project]                      每份文件恰好一个
-[recipes.<配方名>]              想加几个加几个；"ci" 只是 sw verify 的默认参数名
+[recipes.<配方名>]              想加几个加几个；sw verify <配方名> 按名调用
 [recipes.<配方名>.<平台>]       可选的平台覆盖：windows / macos / linux
 [context]                      至多一个
 [context.roots.<根名>]          想加几个加几个
 ```
 
-三个最常见的误读都出在这里：`ci` 和 `check` **不是保留字**，只是模板给的两个示例配方；「在一份文件里配置多个项目」**不存在**，一个仓库一份文件；`recipes.ci` **没有自动触发机制**，它只是 `sw verify` 不带参数时默认查找的名字。
+两个最常见的误读都出在这里：「在一份文件里配置多个项目」**不存在**，一个仓库一份文件；配方**没有自动触发机制** —— `sw verify` 跑 `[recipes.verify]`（命令和默认配方同名，特意的），`sw verify check` 跑 `[recipes.check]`，仅此而已。
 
 ### 全部的键，一张表查完
 
@@ -239,13 +239,13 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 name = "myapp"
 remote = "origin"
 
-[recipes.ci]                # sw verify 默认跑它
+[recipes.verify]            # sw verify 默认跑它 —— 命令即配方名
 steps = ["cargo build --release --all-targets", "cargo test --all"]
 
 [recipes.check]             # sw verify check
 steps = ["cargo clippy --all-targets -- -D warnings"]
 
-[recipes.ci.windows]        # Windows 上 ci 换用这组 steps，env 则与基础合并
+[recipes.verify.windows]    # Windows 上换用这组 steps，env 则与基础合并
 steps = ["cargo build --release", "cargo test --all -- --test-threads=1"]
 env = { CC = "clang-cl" }
 
@@ -270,7 +270,7 @@ path = "docs/ai-notes"
 sw init                                      # 向导逐项询问（在脚本里跑则静默取默认值）
 sw recipe                                    # 列出所有配方
 sw recipe add e2e "bash tests/e2e.sh"        # 加/覆盖，跑法：sw verify e2e
-sw recipe add ci "cargo test" --platform windows   # 给已有配方加平台覆盖
+sw recipe add verify "cargo test" --platform windows   # 给已有配方加平台覆盖
 sw recipe remove e2e
 sw root                                      # 列出根，并显示各自在本机指向哪个目录
 sw root add notes --kind repo --path docs/ai
