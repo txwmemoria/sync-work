@@ -53,9 +53,14 @@ pub async fn run() -> Result<i32> {
     let refresher = {
         let state = state.clone();
         tokio::spawn(async move {
+            // A fixed metronome, not sleep-after-work: refresh() itself takes
+            // a second or more waiting on peer pings, and adding that on top
+            // of the sleep stretched the advertised 5 seconds to 6–8.
+            let mut every = tokio::time::interval(Duration::from_secs(5));
+            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
+                every.tick().await;
                 refresh(&state).await;
-                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         })
     };
