@@ -9,6 +9,7 @@ pub mod hook;
 pub mod pair;
 pub mod project;
 pub mod reset;
+pub mod tui;
 
 use crate::cli::{Cli, Command, HookCmd, ServiceCmd, discover};
 use crate::config::Config;
@@ -24,6 +25,7 @@ pub async fn dispatch(cli: Cli) -> Result<i32> {
             node::serve().await?;
             Ok(0)
         }
+        Command::Tui => tui::run().await,
         Command::Status { peer } => {
             node::ping(peer.as_deref()).await?;
             Ok(0)

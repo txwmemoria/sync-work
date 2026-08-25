@@ -208,8 +208,28 @@ async fn attempt(
                 print_diagnostic(&d);
             }
             Event::MissingBase { base } => return Ok(Outcome::MissingBase(base)),
-            Event::Failed { message } => return Ok(Outcome::Failed(message)),
+            Event::Failed { message } => {
+                crate::history::record(&crate::history::Entry {
+                    ts_ms: crate::ctx::now_ms(),
+                    direction: crate::history::Direction::Sent,
+                    peer: peer_name.to_string(),
+                    project: cfg.project.name.clone(),
+                    recipe: recipe.to_string(),
+                    code: None,
+                    ms: started.elapsed().as_millis() as u64,
+                });
+                return Ok(Outcome::Failed(message));
+            }
             Event::Done { code, ms } => {
+                crate::history::record(&crate::history::Entry {
+                    ts_ms: crate::ctx::now_ms(),
+                    direction: crate::history::Direction::Sent,
+                    peer: peer_name.to_string(),
+                    project: cfg.project.name.clone(),
+                    recipe: recipe.to_string(),
+                    code: Some(code),
+                    ms,
+                });
                 let wall = started.elapsed().as_millis() as u64;
                 let summary = format!(
                     "{} error{}, {} warning{}",

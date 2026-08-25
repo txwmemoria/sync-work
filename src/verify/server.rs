@@ -161,9 +161,22 @@ pub async fn handle(
                 message: format!("{e:#} (running the recipe on {host})"),
             },
         };
-        // Mirrored into the node's own log: the requester sees the full build
-        // output, but whoever is watching this machine should still see that a
-        // request arrived and how it ended.
+        // Recorded for `sw tui` and mirrored into the node's own log: the
+        // requester sees the full build output, but this machine should also
+        // remember that the run happened and how it ended.
+        let (code, ms) = match &ev {
+            Event::Done { code, ms } => (Some(*code), *ms),
+            _ => (None, started.elapsed().as_millis() as u64),
+        };
+        crate::history::record(&crate::history::Entry {
+            ts_ms: crate::ctx::now_ms(),
+            direction: crate::history::Direction::Served,
+            peer: label.clone(),
+            project: v.project.clone(),
+            recipe: v.recipe.clone(),
+            code,
+            ms,
+        });
         match &ev {
             Event::Done { code, ms } => {
                 tracing::info!(

@@ -89,6 +89,30 @@ pub fn stamp() -> String {
     }
 }
 
+/// A short local timestamp (`MM-DD HH:MM:SS`) for dense surfaces like the
+/// dashboard, where the full log format would drown the content it dates.
+pub fn stamp_at_short(ts_ms: u64) -> String {
+    let Ok(t) = time::OffsetDateTime::from_unix_timestamp_nanos(ts_ms as i128 * 1_000_000) else {
+        return "?".into();
+    };
+    let t = match LOCAL_OFFSET.get() {
+        Some(off) => t.to_offset(*off),
+        None => t,
+    };
+    t.format(time::macros::format_description!(
+        "[month]-[day] [hour]:[minute]:[second]"
+    ))
+    .unwrap_or_else(|_| "?".into())
+}
+
+pub fn stamp_now_short() -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    stamp_at_short(ms)
+}
+
 /// Styling helpers returning plain `String`s.
 ///
 /// Chaining works — `"ok".green().bold()` nests two sequences, which renders as

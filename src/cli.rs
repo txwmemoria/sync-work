@@ -152,6 +152,8 @@ pub enum Command {
         #[arg(long)]
         no_push: bool,
     },
+    /// Live dashboard: this machine, peers, projects, and verify history.
+    Tui,
     /// Check that the peer is reachable and speaking the same protocol.
     Status {
         #[arg(long)]

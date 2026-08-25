@@ -204,6 +204,14 @@ grep -q -- "-> exit 0" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "no
 grep -q "served via" "$LAB/node.log"   || { tail -20 "$LAB/node.log"; fail "node log does not report the path it served over"; }
 echo "PASS node log shows request and outcome"
 
+step "verify outcomes land in the history file (both directions)"
+# `sw tui` reads this back; a verify whose result is not recorded would leave
+# the dashboard blind. A asked (sent), B built (served).
+grep -q '"direction":"sent"' "$LAB/hA/history.jsonl"   || { cat "$LAB/hA/history.jsonl" 2>/dev/null; fail "requester recorded nothing"; }
+grep -q '"direction":"served"' "$LAB/hB/history.jsonl"   || { cat "$LAB/hB/history.jsonl" 2>/dev/null; fail "builder recorded nothing"; }
+grep -q '"project":"widget"' "$LAB/hA/history.jsonl" || fail "history entry lacks the project"
+echo "PASS both sides remember the run"
+
 step "the node records where the requester can be reached"
 # A key is only dialable while some public directory is willing to translate it
 # into an address, and that is not a safe assumption: n0's DNS was observed

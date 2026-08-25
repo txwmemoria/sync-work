@@ -31,6 +31,7 @@ mod config;
 mod ctx;
 mod git;
 mod handoff;
+mod history;
 mod node;
 mod service;
 mod style;

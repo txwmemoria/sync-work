@@ -186,6 +186,14 @@ sw status           # 对端在不在线、走直连还是 relay、它服务哪�
 sw doctor           # 哪里不对一次查清（见「排查」）
 ```
 
+### `sw tui` —— 实时面板
+
+```bash
+sw tui              # 本机、对端、项目、verify 历史，一屏看完，每 5 秒自动刷新
+```
+
+只读面板，`q` 或 `Esc` 退出。历史区记录每次 verify 的两个方向：`→ 对端` 是这台机器发起的，`← 对端` 是这台机器替对方构建的，附退出码和耗时。数据落在 `~/.syncwork/history.jsonl`，面板只是读它。
+
 ## 更新
 
 ```bash
@@ -416,8 +424,8 @@ New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$e
 ## 测试与源码
 
 ```bash
-cargo test          # 67 个单元测试
-bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，29 项检查
+cargo test          # 68 个单元测试
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，30 项检查
 ```
 
 端到端覆盖单元测试到不了的部分（配对、传输、worktree 隔离、上下文同步、watch、节点锁），其中多项是真实事故的回放。
@@ -426,13 +434,14 @@ bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，2
 src/
 ├── main.rs           入口：时区捕获、日志、着色、分发
 ├── cli.rs            命令行定义（只有定义，没有实现）
-├── commands/         本地事务性命令：pair / project / configure / hook / doctor / reset
+├── commands/         本地事务性命令：pair / project / configure / hook / doctor / reset / tui
 ├── config/           两层配置：machine（身份、对等表、注册表）+ repo（syncwork.toml）+ platform
 ├── transport/        线路层：message（协议类型）/ frame（分帧）/ endpoint（绑定、连接、鉴权）/ ticket
 ├── node.rs           常驻接受循环；只做路由
 ├── verify/           远端构建验证：client + server + exec（配方执行）
 ├── ctx/              上下文同步：roots（声明求值）/ scan / merge / base（合并基准）/ client / server
 ├── git.rs            git 管道：快照、worktree、patch
+├── history.rs        verify 历史落盘（jsonl），`sw tui` 的数据源
 ├── service.rs        开机自启
 └── style.rs          终端着色与时间戳，非终端时关闭
 ```
@@ -455,7 +464,6 @@ src/
 ## 路线图
 
 - **自建 relay**：把对 n0 公共设施的依赖变成可选项。服务端跑开源的 `iroh-relay`（单个二进制，内置 ACME 自动证书，需要一个域名和 443 端口）；`sw` 这边加一个机器级配置项指向它，配对 ticket 顺带携带 relay 地址，从此连公共查询的首次引导也不需要 —— 私有部署闭环。地址缓存机制已经就位，这一步是水到渠成
-- `sw tui` — ratatui 面板，机器状态、项目列表与构建历史
 - 超过两台机器时，一条命令让所有机器同时验证（`sw verify --all`）
 - Windows keep-alive（不用管理员权限的前提下）
 - `sw mcp` — 以 MCP 服务暴露 verify / handoff / ctx / status，给没有 shell 权限的 AI 宿主（如 ChatGPT 桌面版）用，并返回结构化 JSON 而非终端文本。有 shell 的工具（Claude Code）直接跑命令已经够好，所以等真在无 shell 宿主里需要时再做
