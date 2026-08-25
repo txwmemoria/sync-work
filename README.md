@@ -392,7 +392,9 @@ peers
 New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$env:USERPROFILE\.cargoin\sw.exe" -Protocol UDP -LocalPort 5353 -Action Allow
 ```
 
-没有管理员权限就接受单向：Mac 仍能在局域网里发现 Windows（广播出站不受影响），只是反方向的无外网建联做不到。两台都黄，则是网络本身过滤跨主机组播（企业 AP 隔离），mDNS 在该网络帮不上忙。
+没有管理员权限就接受单向：Mac 仍能在局域网里发现 Windows（广播出站不受影响），只是反方向的无外网建联做不到。
+
+**两台都黄**：先对比两台机器的内网 IP —— 不在同一网段（如 `10.x.46.*` 与 `10.x.21.*`）的话，mDNS 组播天生不跨子网，这是网络拓扑的事实而非故障；直连照样通（内网单播由路由器转发），只是无外网建联做不到。同网段仍两台都黄，才是网络过滤跨主机组播（企业 AP 隔离）。
 
 **两个 shell 报告不同的 `id`** —— `sw pair list` 会打印实际使用的状态目录，先对比这个。配对要在你日常使用的那个 shell 里做。
 

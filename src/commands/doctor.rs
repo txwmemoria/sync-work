@@ -210,6 +210,9 @@ async fn check_peer(r: &mut Report, identity: &Identity, name: &str, peer: &crat
             if text.contains("refused us as unpaired") {
                 r.fail(name, "refused this machine");
                 r.note(text);
+                // A refusal proves the machine is reachable, but LAN visibility
+                // is a separate fact and still worth knowing while re-pairing.
+                lan(r, peer).await;
             } else {
                 r.warn(name, "not reachable");
                 r.note(text);
