@@ -28,7 +28,7 @@ Claude Code 的对话记录和记忆存在本地（`~/.claude/` 下），另一�
 下面是真实输出（机器名和路径已替换）：在 Windows 上敲命令，Mac 编译。
 
 ```
-verify mac-mini  ci  f3f2730e553a + 1 file (659 B → 368 B)
+verify mac-mini  verify  f3f2730e553a + 1 file (659 B → 368 B)
   on mac-mini (macos) [90e2491]  /Users/me/projects/sync-work
   › reusing worktree
   › applying patch
@@ -130,6 +130,18 @@ sw verify --push       # 顺手把分支推到远端（通常不需要）
 
 对端在哪个分支、有没有未提交的改动，都**不影响 verify** —— 构建发生在独立的 worktree（`.sw/wt/`）里，对端自己的工作区永远不被碰。两台机器各自在不同分支上开发、各自一堆未提交改动，互相验证照常。
 
+### 什么时候需要 git push
+
+| 你的状态 | 要 push 吗 |
+|---|---|
+| 代码改了，没提交 | 不用 —— 改动打进 patch 直接送过去 |
+| 本地 commit 了，没推送 | 不用 —— 对端缺这个 commit 时自动回退到与远端的公共祖先、加宽 patch 重发（终端会提示 `retrying against … with a wider patch`） |
+| **改了 `syncwork.toml`**（配方、上下文根） | **要** —— 对端执行它**自己那份**配置（patch 注入不了命令，这是安全设计），push 后对端 pull 才生效；`sw handoff` 一条命令搞定 |
+| 提交完想换机器继续写 | `sw handoff` 替你 push |
+| 孤儿分支，与远端没有公共祖先 | 一次 `sw verify --push`，之后恢复常态 |
+
+一句话记忆：**代码内容跟着 patch 走，配置文件跟着 git 走。**
+
 ### `sw handoff` —— 分支交接
 
 ```bash
@@ -181,13 +193,7 @@ scripts/update.sh        # macOS / Linux
 .\scripts\update.ps1     # Windows
 ```
 
-脚本从自身路径定位仓库，在哪执行都行；顺序固定为**停节点 → git pull → cargo install → 起节点 → 跟日志**（Ctrl-C 只停止观看）。手动等价于：
-
-```bash
-sw service stop && git pull --ff-only && cargo install --path . --locked && sw service start
-```
-
-先停节点不是多余步骤：Windows 上不停根本装不上（运行中的 exe 被锁）；macOS 上更隐蔽 —— 装是装上了，节点却还在跑内存里的旧代码。协议版本变化时两台必须一起更新，混版本会明确报错。
+脚本从自身路径定位仓库，在哪执行都行；顺序固定为**停节点 → git pull → cargo install → 起节点 → 跟日志**（Ctrl-C 只停止观看）。先停节点不是多余步骤：Windows 上不停装不上（运行中的 exe 被锁），macOS 上装了节点却还跑着内存里的旧代码。协议版本变化时两台必须一起更新，混版本会明确报错。
 
 ```bash
 sw service status | restart | stop | start | uninstall
@@ -196,7 +202,7 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 
 ## 不只是写代码
 
-`sw` 对「项目」的全部假设只有两条：在 git 里，以及产出或检验能写成命令。配方是任意 shell 命令，所以多设备协同的非代码项目一样适用 —— 笔记本上写 LaTeX 书稿、让台式机出 PDF（`sw recipe add pdf "latexmk -pdf main.tex"`）；改完博客让另一台构建全站；笔记本改分析脚本、让有 GPU 的机器试跑。这类场景往往是**单向**的：轻设备不用跑节点，只有干重活的那台跑（规则见「从零到能用」第 3 步）。AI 上下文同步同样与项目类型无关 —— 辅助写作的会话和写代码的会话是同一种文件。
+`sw` 对「项目」的全部假设只有两条：在 git 里，产出或检验能写成命令。所以非代码项目一样适用：笔记本写 LaTeX、让台式机出 PDF（`sw recipe add pdf "latexmk -pdf main.tex"`）；改完博客让另一台构建全站；改分析脚本让有 GPU 的机器试跑。这类场景往往是单向的 —— 轻设备不用跑节点，只有干重活的那台跑。AI 上下文同步与项目类型无关，辅助写作的会话和写代码的会话是同一种文件。
 
 ## syncwork.toml 参考
 
@@ -338,21 +344,19 @@ sw root remove notes
 
 iroh 连接天生经过公钥认证 —— remote id 就是完成 QUIC 握手的那把公钥，「id 在本机对等表里」即是全部鉴权，没有 token 可泄漏或轮转；未配对的连接直接关闭。
 
-但 **relay 对同一把 key 只保留一条活跃连接**，第二条连上来，第一条就被顶下线。客户端若拿机器密钥去连对端，等于把本机节点从 relay 上顶掉（`--watch` 曾因此让本机对外失联几个小时）。所以**机器密钥只归节点用**：客户端每次生成一把临时密钥来连接，请求里附上机器密钥对这把临时密钥的签名，对端验签通过后按机器授权。签名被偷走也没用 —— QUIC 握手已经证明了发送方手里有临时密钥的私钥。唯一的例外是配对：ticket 里带的就是机器公钥，必须由它亲自上线发布 —— 一次性操作，顶掉节点几秒钟无妨。
+但 relay 对同一把 key 只保留一条活跃连接，客户端若拿机器密钥去连对端，会把本机节点从 relay 上顶下线（`--watch` 曾因此让本机失联几小时）。所以**机器密钥只归节点用**：客户端每次生成临时密钥连接，请求里附上机器密钥对它的签名，对端验签后按机器授权 —— 签名离开那条连接毫无价值（QUIC 握手已证明发送方持有临时密钥）。唯一例外是配对，ticket 必须由机器公钥亲自上线发布，一次性操作无妨。
 
 ### 可达性：局域网 mDNS 直发现，跨网 relay 牵线
 
-**relay 是公网上的第三方**：iroh 的开发公司 n0, Inc. 在全球架设的免费公共节点，默认配置自动选延迟最近的一台（本项目两台机器实际用的是亚太节点 `aps1-1.relay.n0.iroh.link`）。交给它的只有元数据 —— 哪两把公钥在通信、何时、流量多大；**内容它看不到**：连接是端到端加密的 QUIC，patch、构建日志、会话记录全是密文，密钥从不离开你的两台机器。依赖它的风险是**可用性**而不是机密性（它的 DNS 服务出过一次事故，见下文的地址缓存）。不可接受时可以自建 —— `iroh-relay` 是开源的单个二进制，架在自己服务器上即可（见「路线图」）。
+**同一局域网内不需要 relay**：节点用 mDNS 组播互相发现，直接拨局域网地址，断外网照常工作（企业网可能过滤组播，`sw doctor` 的 `lan` 行直接给答案）。
 
-**同一局域网内，建联根本不需要 relay**：节点通过 mDNS（组播）在本地网络广播自己，对方直接拿到局域网地址拨过来 —— 不碰 relay、不碰公共 DNS，建联也省掉了过 relay 的那 160ms 一个来回。断了外网、只剩内网时照常工作。mDNS 与下述 relay 路径是并行叠加的：不在同一网络时它安静地什么都发现不了，其余机制原样兜底。（企业网络有时过滤组播，是否生效看 `sw doctor` 的路径输出即可。）
+**跨网络时靠 relay** —— iroh 开发公司 n0 的免费公网节点，自动选延迟最近的一台。它身兼两职：**牵线**（双方各自向外连它的 443 端口，交换公网出口地址后同时发包打洞，无需任何端口映射）和**兜底**（打不通就由它转发）。它只经手密文和元数据 —— 端到端加密，密钥从不离开你的两台机器；风险是可用性而非机密性，不可接受时可自建（见「路线图」）。
 
-跨网络时，relay 身兼两职。一是**牵线**：两台机器都主动向外连到公网 relay（HTTPS/443，内网机器不需要端口映射），经它得知自己的公网出口地址、互换后同时向对方发包，把两边 NAT 上的洞凿开 —— 这就是打洞需要的那个「初始化服务器」。二是**兜底**：洞打不通就由 relay 转发。连接是端到端加密的，relay 只搬密文，密钥从不离开两台机器。一内网一公网是最容易的组合；双方都在 NAT 后则看 NAT 类型，打不通也还有 relay。
-
-手里只有公钥的话，连不连得上就全看公共查询服务愿不愿意把 key 翻译成地址 —— 而这个假设被实测推翻过：n0 的权威 DNS 对一台机器正常应答，对另一台却返回「域名不存在」，记录明明就在同一个服务的存储里。所以每个请求都带上发送方自己的 relay 地址，接收方记进对等表（`sw doctor` 里显示为 `address`）。**只要通过一次，这对机器就再也不用求公共查询了**；连接时缓存地址和公共查询同时进行，地址过期顶多浪费一次探测。地址由节点在上线后写下，短命令直接从配置里读。
+**地址自己记，不赌公共查询**：n0 的 DNS 实测出过「对一台机器正常应答、对另一台返回不存在」的事故，所以每个请求都带上发送方自己的 relay 地址，接收方记进对等表（doctor 显示为 `address`）。通过一次，这对机器就再不依赖公共查询；缓存与查询并行，地址过期只浪费一次探测。
 
 ### 记忆文件为什么能自动合并（ctx）
 
-三方合并需要共同祖先，而两机同步天然有一个：**上一次两边内容一致时的那份**。每次同步发现某个 `.md` 两边哈希相同，就把它存一份影子副本（`~/.syncwork/ctx-base/`）；日后两边分叉时，拿它做基准逐行合并 —— 有基准才能区分「B 新增了一行」和「A 删掉了一行」，这是只看两个版本永远做不到的。两边在同一位置各插入不同条目（记忆文件的常态）按内容排序后双双保留，保证两台机器合出的字节完全一致。合并只在发起方做：结果推给对端时带上「我合并时你是哈希 H」，对端核对自己仍是 H 就直接覆盖 —— 对端不需要自己的影子副本。改了同一行是真冲突，放弃合并，走老规矩留备份。
+三方合并需要共同祖先，两机同步天然有一个：**上一次两边内容一致时的那份**。每次同步发现某个 `.md` 两边哈希相同，就存一份影子副本（`~/.syncwork/ctx-base/`）；日后分叉时拿它做基准逐行合并 —— 有基准才能区分「B 新增了一行」和「A 删掉了一行」，只看两个版本永远做不到。两边同一位置各插入不同条目（记忆文件的常态）按内容排序后双双保留，两台机器合出的字节完全一致。合并只在发起方做，结果推给对端时带上「我合并时你是哈希 H」，对端核对无误直接覆盖，不需要自己的影子副本。改同一行是真冲突，放弃合并，留备份。
 
 ### 路径推导（ctx）
 
@@ -398,7 +402,7 @@ peers
 **doctor 的 `lan` 行是黄的（mDNS 没发现对方）** —— 先在**两台**机器上各跑一次 `sw doctor` 对比。只有 Windows 黄、Mac 绿的话，几乎一定是 Windows 防火墙：Public/Domain 网络默认拦截入站 UDP 5353，系统自带的 mDNS 放行规则只给了系统服务。有管理员权限就放行（一次性）：
 
 ```powershell
-New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$env:USERPROFILE\.cargoin\sw.exe" -Protocol UDP -LocalPort 5353 -Action Allow
+New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$env:USERPROFILE\.cargo\bin\sw.exe" -Protocol UDP -LocalPort 5353 -Action Allow
 ```
 
 没有管理员权限就接受单向：Mac 仍能在局域网里发现 Windows（广播出站不受影响），只是反方向的无外网建联做不到。
@@ -412,8 +416,8 @@ New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$e
 ## 测试与源码
 
 ```bash
-cargo test          # 57 个单元测试
-bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，27 项检查
+cargo test          # 67 个单元测试
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，29 项检查
 ```
 
 端到端覆盖单元测试到不了的部分（配对、传输、worktree 隔离、上下文同步、watch、节点锁），其中多项是真实事故的回放。
@@ -422,12 +426,12 @@ bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，2
 src/
 ├── main.rs           入口：时区捕获、日志、着色、分发
 ├── cli.rs            命令行定义（只有定义，没有实现）
-├── commands/         本地事务性命令：pair / project / hook / doctor / reset
+├── commands/         本地事务性命令：pair / project / configure / hook / doctor / reset
 ├── config/           两层配置：machine（身份、对等表、注册表）+ repo（syncwork.toml）+ platform
 ├── transport/        线路层：message（协议类型）/ frame（分帧）/ endpoint（绑定、连接、鉴权）/ ticket
 ├── node.rs           常驻接受循环；只做路由
 ├── verify/           远端构建验证：client + server + exec（配方执行）
-├── ctx/              上下文同步：roots（声明求值）/ scan / merge / client / server
+├── ctx/              上下文同步：roots（声明求值）/ scan / merge / base（合并基准）/ client / server
 ├── git.rs            git 管道：快照、worktree、patch
 ├── service.rs        开机自启
 └── style.rs          终端着色与时间戳，非终端时关闭
