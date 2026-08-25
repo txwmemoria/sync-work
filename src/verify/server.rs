@@ -16,6 +16,32 @@ use iroh::endpoint::SendStream;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+/// Explain a recipe lookup failure in terms the *requester* can act on.
+///
+/// The bare "no recipe `verify`" confused its first real user within hours: the
+/// recipe had just been renamed in a commit that was not yet pushed, and nothing
+/// said whose config was consulted or why the rename had not arrived. Recipe
+/// lists come from this machine's own checkout — the one thing a patch cannot
+/// carry — so the message has to teach exactly that, and name what IS here.
+fn recipe_failure(cfg: &Config, wanted: &str, host: &str, err: &anyhow::Error) -> String {
+    if cfg.recipes.contains_key(wanted) {
+        // Present but unusable (e.g. no steps for this platform): the inner
+        // error already names the table to fix.
+        return format!("{err:#} (in {host}'s copy of syncwork.toml)");
+    }
+    let available = if cfg.recipes.is_empty() {
+        "none at all".to_string()
+    } else {
+        cfg.recipes.keys().cloned().collect::<Vec<_>>().join(", ")
+    };
+    format!(
+        "no recipe `{wanted}` in {host}'s copy of syncwork.toml (it has: {available}). \
+         The peer runs its own copy of the recipe list, so a new or renamed recipe \
+         reaches it only through git — push this branch and pull it there, or run \
+         `sw handoff`"
+    )
+}
+
 pub async fn handle(
     mut tx: SendStream,
     peer_name: &str,
@@ -44,6 +70,11 @@ pub async fn handle(
             return;
         }
 
+        // Every message below crosses the wire and is read on the *other*
+        // machine, so each one names this host — "the file is missing" is
+        // useless to someone who cannot see this filesystem.
+        let host = Machine::load().map(|m| m.node_name()).unwrap_or_default();
+
         let repo = match Machine::resolve_project(&v.project) {
             Ok(r) => r,
             Err(message) => {
@@ -54,9 +85,9 @@ pub async fn handle(
 
         let cfg = match Config::load(&repo) {
             Ok(c) => c,
-            Err(e) => {
+            Err(_) => {
                 send(Event::Failed {
-                    message: format!("{e:#}"),
+                    message: crate::config::repo::missing_config_message(&host, &v.project, &repo),
                 })
                 .await;
                 return;
@@ -66,7 +97,8 @@ pub async fn handle(
         if cfg.project.name != v.project {
             send(Event::Failed {
                 message: format!(
-                    "{} holds project `{}`, not `{}` — the registry entry is stale",
+                    "{} on {host} holds project `{}`, not `{}` — its registry entry \
+                     is stale; run `sw link` in the right clone on {host}",
                     repo.display(),
                     cfg.project.name,
                     v.project
@@ -77,7 +109,7 @@ pub async fn handle(
         }
 
         send(Event::Accepted {
-            host: Machine::load().map(|m| m.node_name()).unwrap_or_default(),
+            host: host.clone(),
             platform,
             repo: repo.display().to_string(),
             build: env!("SW_BUILD").to_string(),
@@ -88,7 +120,7 @@ pub async fn handle(
             Ok(r) => r,
             Err(e) => {
                 send(Event::Failed {
-                    message: format!("{e:#}"),
+                    message: recipe_failure(&cfg, &v.recipe, &host, &e),
                 })
                 .await;
                 return;
@@ -112,7 +144,7 @@ pub async fn handle(
                 }
                 Err(git::PrepareError::Other(e)) => {
                     send(Event::Failed {
-                        message: format!("{e:#}"),
+                        message: format!("{e:#} (preparing the worktree on {host})"),
                     })
                     .await;
                     return;
@@ -126,7 +158,7 @@ pub async fn handle(
                 ms: started.elapsed().as_millis() as u64,
             },
             Err(e) => Event::Failed {
-                message: format!("{e:#}"),
+                message: format!("{e:#} (running the recipe on {host})"),
             },
         };
         // Mirrored into the node's own log: the requester sees the full build
@@ -178,4 +210,31 @@ pub async fn handle(
     written?;
     tx.finish().ok();
     Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The failure that motivated this: a recipe renamed in an unpushed commit.
+    /// The requester needs to learn three things from one line — whose config
+    /// was consulted, what it actually contains, and how changes get there.
+    #[test]
+    fn a_missing_recipe_names_the_host_the_alternatives_and_the_fix() {
+        let cfg: Config = toml::from_str(
+            "[project]\nname = \"demo\"\n\n[recipes.ci]\nsteps = [\"cargo test\"]\n\n\
+             [recipes.build]\nsteps = [\"make\"]\n",
+        )
+        .unwrap();
+        let err = anyhow::anyhow!("no recipe `verify` in syncwork.toml");
+        let msg = recipe_failure(&cfg, "verify", "mac-mini", &err);
+        assert!(msg.contains("mac-mini's copy"), "whose config: {msg}");
+        assert!(msg.contains("build, ci"), "what it has: {msg}");
+        assert!(msg.contains("sw handoff"), "how to fix: {msg}");
+
+        // A recipe that exists but cannot run here keeps the inner error, which
+        // already names the exact table to add.
+        let inner = anyhow::anyhow!("recipe `build` has no steps for linux");
+        let msg = recipe_failure(&cfg, "build", "mac-mini", &inner);
+        assert!(msg.contains("no steps for linux"), "{msg}");
+    }
 }

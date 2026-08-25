@@ -305,7 +305,10 @@ async fn route(
                     Ok(repo) => match ctx::server::manifest(&repo) {
                         Ok(f) => f,
                         Err(e) => CtxFrame::Failed {
-                            message: format!("{e:#}"),
+                            message: format!(
+                                "{e:#} (scanning context on {})",
+                                Machine::load().map(|m| m.node_name()).unwrap_or_default()
+                            ),
                         },
                     },
                 }

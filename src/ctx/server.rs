@@ -11,6 +11,24 @@ use anyhow::{Context as _, Result, bail};
 use iroh::endpoint::{RecvStream, SendStream};
 use std::path::Path;
 
+/// Explain a context root the requester declared but this machine cannot see.
+///
+/// Same shape as a missing recipe: roots live in the committed config, so the
+/// usual cause is a config change that has not been pulled here yet.
+fn no_root_message(cfg: &crate::config::Config, wanted: &str) -> String {
+    let host = Machine::load().map(|m| m.node_name()).unwrap_or_default();
+    let known: Vec<String> = cfg.context.resolved_roots().keys().cloned().collect();
+    let known = if known.is_empty() {
+        "none".to_string()
+    } else {
+        known.join(", ")
+    };
+    format!(
+        "no context root `{wanted}` in {host}'s copy of syncwork.toml (it has: {known}) \
+         — roots live in the committed config; pull the branch on {host} to update it"
+    )
+}
+
 /// Answer a manifest request.
 pub fn manifest(repo: &Path) -> Result<CtxFrame> {
     let cfg = Config::load(repo)?;
@@ -40,7 +58,7 @@ pub async fn fetch(
         transport::write_json(
             tx,
             &CtxFrame::Failed {
-                message: format!("no root `{root_key}`"),
+                message: no_root_message(&cfg, root_key),
             },
         )
         .await?;
@@ -86,7 +104,7 @@ pub async fn push(
         transport::write_json(
             tx,
             &CtxFrame::Failed {
-                message: format!("no root `{root_key}`"),
+                message: no_root_message(&cfg, root_key),
             },
         )
         .await?;
@@ -141,10 +159,11 @@ pub async fn push(
                     }
                     Ok(_) => {}
                     Err(e) => {
+                        let host = Machine::load().map(|m| m.node_name()).unwrap_or_default();
                         transport::write_json(
                             tx,
                             &CtxFrame::Failed {
-                                message: format!("{e:#}"),
+                                message: format!("{e:#} (writing {path} on {host})"),
                             },
                         )
                         .await?;

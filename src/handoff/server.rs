@@ -23,9 +23,9 @@ pub async fn handle(project: &str, branch: &str) -> HandoffResult {
     };
     let cfg = match Config::load(&repo) {
         Ok(c) => c,
-        Err(e) => {
+        Err(_) => {
             return HandoffResult::Failed {
-                message: format!("{e:#}"),
+                message: crate::config::repo::missing_config_message(&host, project, &repo),
             };
         }
     };
@@ -33,7 +33,7 @@ pub async fn handle(project: &str, branch: &str) -> HandoffResult {
     match run(&repo, &cfg.project.remote, branch, &host).await {
         Ok(result) => result,
         Err(e) => HandoffResult::Failed {
-            message: format!("{e:#}"),
+            message: format!("{e:#} (fetching on {host})"),
         },
     }
 }

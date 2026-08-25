@@ -230,6 +230,19 @@ pub struct Config {
     pub context: ContextConfig,
 }
 
+/// Explain, to the machine that asked, why this machine has no config for a
+/// project. The requester cannot see this filesystem, so the message has to
+/// carry everything: whose checkout, which path, and that the fix is a git
+/// pull there — committed files do not ride the verify patch's fast path.
+pub fn missing_config_message(host: &str, project: &str, path: &Path) -> String {
+    format!(
+        "{host}'s checkout of `{project}` ({}) has no {CONFIG_FILE} — the commit \
+         that adds or renames it has not arrived there. Push this branch and pull \
+         it on {host}, or run `sw handoff`",
+        path.display()
+    )
+}
+
 impl Config {
     pub fn load(repo_root: &Path) -> Result<Self> {
         let path = repo_root.join(CONFIG_FILE);
