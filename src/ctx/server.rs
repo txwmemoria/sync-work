@@ -55,6 +55,7 @@ pub async fn fetch(
                     &CtxFrame::File {
                         path: p.clone(),
                         mtime_ms,
+                        replaces: None,
                     },
                 )
                 .await?;
@@ -94,11 +95,47 @@ pub async fn push(
     std::fs::create_dir_all(&root.dir)
         .with_context(|| format!("creating {}", root.dir.display()))?;
 
+    let project = cfg.project.name.as_str();
     loop {
         match transport::read_json::<CtxFrame>(rx).await? {
-            CtxFrame::File { path, mtime_ms } => {
+            CtxFrame::File {
+                path,
+                mtime_ms,
+                replaces,
+            } => {
                 let bytes = transport::read_frame(rx).await?;
-                match ctx::apply_incoming(&root.dir, &path, mtime_ms, &bytes, peer_name) {
+                // A merged file names the version it replaces. If that is still
+                // exactly what we hold, the merge contains everything here and
+                // may overwrite outright; if our copy moved on meanwhile, fall
+                // through to the ordinary preserve-the-loser rules.
+                let still_parent = replaces.is_some_and(|h| {
+                    ctx::read_for_send(&root.dir, &path)
+                        .map(|(cur, _)| ctx::hash_bytes(&cur) == h)
+                        .unwrap_or(false)
+                });
+                let outcome = if still_parent {
+                    ctx::merge::apply_exact(
+                        &root.dir,
+                        &path,
+                        mtime_ms,
+                        &bytes,
+                        Some((project, root_key)),
+                    )
+                    .map(|()| {
+                        tracing::info!("{path} merged (both sides kept)");
+                        Applied::Replaced
+                    })
+                } else {
+                    ctx::apply_incoming(
+                        &root.dir,
+                        &path,
+                        mtime_ms,
+                        &bytes,
+                        peer_name,
+                        Some((project, root_key)),
+                    )
+                };
+                match outcome {
                     Ok(Applied::Conflict(b)) => {
                         tracing::warn!("{path} diverged; kept local as {}", b.display())
                     }

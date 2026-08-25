@@ -53,6 +53,7 @@ const HEARTBEAT_POLLS: u32 = 30;
 struct Totals {
     pulled: usize,
     pushed: usize,
+    merged: usize,
     extended: usize,
     conflicts: usize,
     skipped: usize,
@@ -219,21 +220,35 @@ async fn exchange(
             continue;
         }
 
-        let plan = ctx::plan(&local, remote, now, quiet_ms);
-        totals.identical += plan.identical;
+        let plan = ctx::plan(&local, remote, now, quiet_ms, &|p| {
+            ctx::base::mergeable(p) && ctx::base::load(project, &root.key, p).is_some()
+        });
+        totals.identical += plan.identical.len();
         totals.skipped += plan.skipped.len();
+
+        // A moment of known convergence is exactly when the merge base should be
+        // recorded — it is also how existing deployments grow bases at all.
+        for p in &plan.identical {
+            if ctx::base::mergeable(p)
+                && let Ok((bytes, _)) = ctx::read_for_send(&root.dir, p)
+                && let Err(e) = ctx::base::store(project, &root.key, p, &bytes)
+            {
+                tracing::debug!("could not record merge base for {p}: {e:#}");
+            }
+        }
 
         let label = root.key.cyan().to_string();
         if plan.is_empty() && plan.skipped.is_empty() {
             if opts.chatty() {
-                say!("  {label} in sync ({} files)", plan.identical);
+                say!("  {label} in sync ({} files)", plan.identical.len());
             }
         } else {
             say!(
-                "  {label}  {} to pull, {} to push, {} identical",
+                "  {label}  {} to pull, {} to push, {} to merge, {} identical",
                 plan.pull.len(),
                 plan.push.len(),
-                plan.identical
+                plan.reconcile.len(),
+                plan.identical.len()
             );
         }
         for (p, why) in &plan.skipped {
@@ -247,6 +262,9 @@ async fn exchange(
             for p in &plan.push {
                 say!("    {} {p}", "push".blue());
             }
+            for p in &plan.reconcile {
+                say!("    {} {p}", "merge".cyan());
+            }
             continue;
         }
 
@@ -254,7 +272,27 @@ async fn exchange(
             pull(conn, project, root, &plan.pull, &remote_host, &mut totals).await?;
         }
         if !plan.push.is_empty() {
-            push(conn, project, root, &plan.push, &mut totals).await?;
+            push(
+                conn,
+                project,
+                root,
+                &plan.push,
+                &Default::default(),
+                &mut totals,
+            )
+            .await?;
+        }
+        if !plan.reconcile.is_empty() {
+            reconcile(
+                conn,
+                project,
+                root,
+                &plan.reconcile,
+                remote,
+                &remote_host,
+                &mut totals,
+            )
+            .await?;
         }
     }
 
@@ -265,13 +303,21 @@ async fn exchange(
 
     // A watch that reported "0 pulled, 0 pushed" every minute would bury the lines
     // that matter.
-    if !opts.chatty() && totals.pulled == 0 && totals.pushed == 0 && totals.conflicts == 0 {
+    if !opts.chatty()
+        && totals.pulled == 0
+        && totals.pushed == 0
+        && totals.merged == 0
+        && totals.conflicts == 0
+    {
         return Ok(0);
     }
     let mut parts = vec![
         format!("{} pulled", totals.pulled),
         format!("{} pushed", totals.pushed),
     ];
+    if totals.merged > 0 {
+        parts.push(format!("{} merged", totals.merged));
+    }
     if totals.extended > 0 {
         parts.push(format!("{} appended", totals.extended));
     }
@@ -332,13 +378,138 @@ async fn pull(
 
     loop {
         match transport::read_json::<CtxFrame>(&mut rx).await? {
-            CtxFrame::File { path, mtime_ms } => {
+            CtxFrame::File { path, mtime_ms, .. } => {
                 let bytes = transport::read_frame(&mut rx).await?;
-                let applied = ctx::apply_incoming(&root.dir, &path, mtime_ms, &bytes, remote_host)?;
+                let applied = ctx::apply_incoming(
+                    &root.dir,
+                    &path,
+                    mtime_ms,
+                    &bytes,
+                    remote_host,
+                    Some((project, &root.key)),
+                )?;
                 totals.pulled += 1;
                 report(&path, &applied, totals, "pull");
             }
             CtxFrame::End => return Ok(()),
+            CtxFrame::Failed { message } => bail!("peer refused fetch: {message}"),
+            other => bail!("unexpected frame during fetch: {other:?}"),
+        }
+    }
+}
+
+/// Merge files that changed on both sides, using the recorded common ancestor.
+///
+/// The merge happens entirely here, on the client: it fetches the remote
+/// version, merges three-way against its base, writes the result locally, and
+/// pushes it back tagged with the hash of the remote version it consumed. The
+/// peer needs no base store of its own — it just checks that its file still is
+/// that version and overwrites. When the same lines changed on both sides the
+/// merge is refused, and the file falls back to the old newer-wins rule, whose
+/// worst case is the conflict copy — never markers spliced into the file.
+#[allow(clippy::too_many_arguments)]
+async fn reconcile(
+    conn: &Connection,
+    project: &str,
+    root: &Root,
+    paths: &[String],
+    remote: &CtxRoot,
+    remote_host: &str,
+    totals: &mut Totals,
+) -> Result<()> {
+    let theirs = fetch_raw(conn, project, root, paths).await?;
+
+    let mut merged_paths = Vec::new();
+    let mut replaces = std::collections::BTreeMap::new();
+    for (path, their_mtime, their_bytes) in &theirs {
+        let (our_bytes, our_mtime) = match ctx::read_for_send(&root.dir, path) {
+            Ok(v) => v,
+            Err(e) => {
+                say!("    {} {path} ({e})", "skip".yellow());
+                continue;
+            }
+        };
+        let base = ctx::base::load(project, &root.key, path);
+
+        let outcome = base
+            .as_deref()
+            .and_then(|b| ctx::merge::three_way(b, &our_bytes, their_bytes));
+        match outcome {
+            Some(merged) => {
+                // Written with a fresh mtime: the merge postdates both parents.
+                ctx::merge::apply_exact(&root.dir, path, ctx::now_ms(), &merged, None)?;
+                let their_hash = remote
+                    .entries
+                    .iter()
+                    .find(|e| &e.path == path)
+                    .map(|e| e.hash.clone())
+                    .unwrap_or_else(|| ctx::hash_bytes(their_bytes));
+                replaces.insert(path.clone(), their_hash);
+                merged_paths.push(path.clone());
+            }
+            None => {
+                // Same lines edited on both sides (or not text): the merge would
+                // have to guess, so it refuses, and the file takes the same path
+                // it always did — newer side wins, the loser is preserved.
+                if *their_mtime > our_mtime {
+                    let applied = ctx::apply_incoming(
+                        &root.dir,
+                        path,
+                        *their_mtime,
+                        their_bytes,
+                        remote_host,
+                        Some((project, &root.key)),
+                    )?;
+                    totals.pulled += 1;
+                    report(path, &applied, totals, "pull");
+                } else {
+                    push(
+                        conn,
+                        project,
+                        root,
+                        std::slice::from_ref(path),
+                        &Default::default(),
+                        totals,
+                    )
+                    .await?;
+                }
+            }
+        }
+    }
+
+    if !merged_paths.is_empty() {
+        push(conn, project, root, &merged_paths, &replaces, totals).await?;
+    }
+    Ok(())
+}
+
+/// Fetch files without applying them — the reconcile path needs the raw bytes.
+async fn fetch_raw(
+    conn: &Connection,
+    project: &str,
+    root: &Root,
+    paths: &[String],
+) -> Result<Vec<(String, u64, Vec<u8>)>> {
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
+    transport::write_request(
+        &mut tx,
+        Request::CtxFetch {
+            project: project.to_string(),
+            root: root.key.clone(),
+            paths: paths.to_vec(),
+        },
+    )
+    .await?;
+    tx.finish().ok();
+
+    let mut out = Vec::new();
+    loop {
+        match transport::read_json::<CtxFrame>(&mut rx).await? {
+            CtxFrame::File { path, mtime_ms, .. } => {
+                let bytes = transport::read_frame(&mut rx).await?;
+                out.push((path, mtime_ms, bytes));
+            }
+            CtxFrame::End => return Ok(out),
             CtxFrame::Failed { message } => bail!("peer refused fetch: {message}"),
             other => bail!("unexpected frame during fetch: {other:?}"),
         }
@@ -350,6 +521,7 @@ async fn push(
     project: &str,
     root: &Root,
     paths: &[String],
+    replaces: &std::collections::BTreeMap<String, String>,
     totals: &mut Totals,
 ) -> Result<()> {
     let (mut tx, mut rx) = transport::open_request(conn).await?;
@@ -376,12 +548,18 @@ async fn push(
             &CtxFrame::File {
                 path: p.clone(),
                 mtime_ms,
+                replaces: replaces.get(p).cloned(),
             },
         )
         .await?;
         transport::write_frame(&mut tx, &bytes).await?;
-        totals.pushed += 1;
-        say!("    {} {p}", "push".blue());
+        if replaces.contains_key(p) {
+            totals.merged += 1;
+            say!("    {} {p} (kept both sides)", "merge".cyan());
+        } else {
+            totals.pushed += 1;
+            say!("    {} {p}", "push".blue());
+        }
     }
     transport::write_json(&mut tx, &CtxFrame::End).await?;
     tx.finish().ok();

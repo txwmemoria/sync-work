@@ -30,9 +30,13 @@ pub(super) fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
 /// Hash file contents. Truncated to 16 bytes: this is change detection between
 /// two trusted peers, not a security boundary, and it keeps manifests small.
 fn hash_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)?;
-    let full = blake3::hash(&bytes);
-    Ok(hex::encode(&full.as_bytes()[..16]))
+    Ok(hash_bytes(&std::fs::read(path)?))
+}
+
+/// The manifest hash of a byte string — the same form [`CtxEntry::hash`] carries,
+/// so a receiver can check "is my current file the one this merge replaced".
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    hex::encode(&blake3::hash(bytes).as_bytes()[..16])
 }
 
 /// Build the manifest for one root. A missing directory is reported as absent

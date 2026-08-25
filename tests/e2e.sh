@@ -402,6 +402,42 @@ grep -q "othertool" "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "the root is not 
 grep -q "claude" "$LAB/c6.err" || { cat "$LAB/c6.err"; fail "declaring a root dropped claude"; }
 echo "PASS declared root synced, alongside the built-in one"
 
+step "ctx: memory entries added on both machines merge, neither is lost"
+# The incident this replays: both machines' Claude sessions append entries to
+# MEMORY.md between syncs. Strict newer-wins would silently drop one side's
+# memory; a conflict copy would demand manual merging every time. With a
+# recorded common ancestor the two additions merge, and the merge result must
+# converge on both machines with no conflict file.
+MEM_A="$CLAUDE_A/memory"; MEM_B="$CLAUDE_B/memory"
+mkdir -p "$MEM_A" "$MEM_B"
+printf -- '- [Old](old.md) - existing entry\n' > "$MEM_A/MEMORY.md"
+a "A/widget" ctx > /dev/null 2>&1 || fail "seed sync failed"
+# Second run sees the file identical on both sides, which is what records the
+# common ancestor on the initiating machine.
+a "A/widget" ctx > /dev/null 2>&1 || fail "base-stamping sync failed"
+[ -f "$MEM_B/MEMORY.md" ] || fail "seed did not reach B"
+
+# Diverge: each machine appends its own entry. mtimes must differ from each
+# other but both be past the quiet window, hence the touches below.
+printf -- '- [FromA](a.md) - added on A\n' >> "$MEM_A/MEMORY.md"
+printf -- '- [FromB](b.md) - added on B\n' >> "$MEM_B/MEMORY.md"
+touch -t 202601010101 "$MEM_A/MEMORY.md"
+touch -t 202601010202 "$MEM_B/MEMORY.md"
+
+a "A/widget" ctx > "$LAB/m.out" 2> "$LAB/m.err" || { cat "$LAB/m.err"; fail "merge sync failed"; }
+grep -q "merge" "$LAB/m.err" || { cat "$LAB/m.err"; fail "the divergence was not merged"; }
+for side in "$MEM_A" "$MEM_B"; do
+  grep -q "FromA" "$side/MEMORY.md" || { cat "$side/MEMORY.md"; fail "A's entry lost on $side"; }
+  grep -q "FromB" "$side/MEMORY.md" || { cat "$side/MEMORY.md"; fail "B's entry lost on $side"; }
+  grep -q "Old"   "$side/MEMORY.md" || fail "the pre-existing entry vanished on $side"
+done
+ls "$MEM_A" "$MEM_B" | grep -q "conflict" && fail "a clean merge still left a conflict copy"
+# And the pair must converge: one more run moves nothing.
+a "A/widget" ctx > /dev/null 2> "$LAB/m2.err" || fail "post-merge sync failed"
+grep -qE "0 pulled, 0 pushed" "$LAB/m2.err" \
+  || { cat "$LAB/m2.err"; fail "merge did not converge — files still bouncing"; }
+echo "PASS both entries kept on both machines, no conflict copy, converged"
+
 step "ctx --watch: picks up a change without being asked again"
 # A's own node is started FIRST, so this step also proves the fix for a real
 # incident: a client that dials with the machine key replaces the node's relay

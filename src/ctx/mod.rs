@@ -14,6 +14,7 @@
 //! `merge` are pure filesystem-and-policy code; `client` and `server` are the two
 //! ends of the exchange.
 
+pub mod base;
 pub mod client;
 pub mod merge;
 pub mod roots;
@@ -23,4 +24,4 @@ pub mod server;
 pub use client::{Options, sync};
 pub use merge::{Applied, apply_incoming, plan};
 pub use roots::{Root, resolve_roots};
-pub use scan::{fingerprint, now_ms, read_for_send, scan};
+pub use scan::{fingerprint, hash_bytes, now_ms, read_for_send, scan};

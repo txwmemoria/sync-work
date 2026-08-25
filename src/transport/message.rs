@@ -270,10 +270,26 @@ pub struct CtxRoot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum CtxFrame {
-    Roots { host: String, roots: Vec<CtxRoot> },
-    File { path: String, mtime_ms: u64 },
+    Roots {
+        host: String,
+        roots: Vec<CtxRoot>,
+    },
+    File {
+        path: String,
+        mtime_ms: u64,
+        /// Set when this file is a three-way merge whose remote parent was the
+        /// version with this manifest hash. A receiver still holding exactly
+        /// that version may overwrite without any preservation dance — the
+        /// merge already contains everything it holds. If its file has moved
+        /// on since, the hash mismatches and the normal rules apply. This is
+        /// what lets one side merge without the other keeping a base store.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<String>,
+    },
     End,
-    Failed { message: String },
+    Failed {
+        message: String,
+    },
 }
 
 #[cfg(test)]
