@@ -212,19 +212,17 @@ pub fn recipe(repo: &Path, cmd: Option<RecipeCmd>) -> Result<i32> {
         } => {
             let mut doc = load_doc(repo)?;
 
-            // The platform override goes *inside* an existing recipe; steps for
-            // a platform nobody defined a base for would never run anywhere.
+            // A platform block may stand alone — two platforms whose commands
+            // share nothing need no fake base to override. Whichever platform
+            // ends up with no steps is refused at run time, by name.
             let table = match &platform {
                 None => subtable(&mut doc, "recipes", &name),
                 Some(p) => {
                     if !["windows", "macos", "linux"].contains(&p.as_str()) {
                         bail!("no platform `{p}` — windows, macos or linux");
                     }
-                    if doc.get("recipes").and_then(|r| r.get(&name)).is_none() {
-                        bail!("no recipe `{name}` to override — add its base steps first");
-                    }
                     let recipe = subtable(&mut doc, "recipes", &name);
-                    recipe.set_implicit(false);
+                    recipe.set_implicit(true);
                     recipe
                         .entry(p.as_str())
                         .or_insert(Item::Table(Table::new()))
@@ -440,8 +438,9 @@ mod tests {
             ["cargo test -- --test-threads=1"]
         );
 
-        // Overriding a recipe that does not exist is refused with direction.
-        let err = recipe(
+        // A platform block with no base is the explicit per-platform style,
+        // and creating it directly is legal.
+        recipe(
             &dir,
             Some(RecipeCmd::Add {
                 name: "ghost".into(),
@@ -450,8 +449,14 @@ mod tests {
                 platform: Some("macos".into()),
             }),
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("add its base steps first"));
+        .unwrap();
+        let cfg = Config::load(&dir).unwrap();
+        let ghost = &cfg.recipes["ghost"];
+        assert!(ghost.steps.is_empty(), "no base steps were asked for");
+        assert_eq!(
+            ghost.macos.as_ref().unwrap().steps.as_deref().unwrap(),
+            ["x"]
+        );
 
         recipe(&dir, Some(RecipeCmd::Remove { name: "e2e".into() })).unwrap();
         assert!(!Config::load(&dir).unwrap().recipes.contains_key("e2e"));

@@ -222,10 +222,10 @@ sw service logs -f       # 节点日志，统一三个平台的位置差异（-n
 |---|---|---|---|
 | `project.name` | 是 | — | 两台机器认出「同一个项目」的名字，改了要两边一起改 |
 | `project.remote` | 否 | `origin` | 对端缺 commit 时从这个远端 fetch |
-| `recipes.<名>.steps` | 是 | — | 依次执行的 shell 命令，一条失败即停，退出码带回发起方 |
+| `recipes.<名>.steps` | 基础与平台块至少一处 | — | 依次执行的 shell 命令，一条失败即停，退出码带回发起方 |
 | `recipes.<名>.env` | 否 | 空 | 执行时注入的环境变量 |
 | `recipes.<名>.cargo_json` | 否 | `true` | 给 cargo 命令注入 JSON 诊断输出（非 Rust 项目无影响） |
-| `recipes.<名>.<平台>.steps` | 否 | — | 平台覆盖：**整体替换**基础 steps |
+| `recipes.<名>.<平台>.steps` | 否 | — | 平台块：有基础 steps 时**整体替换**它；没有基础时就是该平台的全部命令（纯分平台写法） |
 | `recipes.<名>.<平台>.env` | 否 | — | 平台覆盖：与基础 env **合并** |
 | `context.quiet_secs` | 否 | `5` | 最近几秒内还在被写入的文件，本轮同步先跳过 |
 | `context.roots.<名>.kind` | 是 | — | 三选一：`claude-project`（Claude Code 的按项目目录，路径自动推导）/ `home`（相对各机 home）/ `repo`（相对仓库目录） |
@@ -248,6 +248,11 @@ steps = ["cargo clippy --all-targets -- -D warnings"]
 [recipes.verify.windows]    # Windows 上换用这组 steps，env 则与基础合并
 steps = ["cargo build --release", "cargo test --all -- --test-threads=1"]
 env = { CC = "clang-cl" }
+
+[recipes.build.macos]       # 两个平台毫无共同点时不必编一个「基础」——
+steps = ["sh build.sh mac"] # 直接各写各的；没写的平台在执行时明确报错
+[recipes.build.windows]
+steps = ['.\build.cmd windows']
 
 [context]
 quiet_secs = 5
@@ -277,7 +282,7 @@ sw root add notes --kind repo --path docs/ai
 sw root remove notes
 ```
 
-命令编辑会保留你手写的注释和排版，落盘前先校验。
+命令编辑会保留你手写的注释和排版，落盘前先校验。另外 `sw doctor` 会指出配置里**拼错而被静默忽略的键**（比如平台块写成 `mac` —— 正确的是 `macos`），这类错误 TOML 解析器故意容忍（新旧版本要能读同一份文件），所以必须有人专门喊出来。
 
 ### 三条行为规则
 

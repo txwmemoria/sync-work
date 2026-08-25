@@ -22,6 +22,11 @@ pub const STATE_DIR_IGNORE: &str = ".sw/";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Recipe {
+    /// May be empty when every platform block declares its own steps — the
+    /// fully explicit style for commands that share nothing across platforms.
+    /// What is required is that the platform actually *executing* the recipe
+    /// ends up with steps from somewhere; [`Config::recipe`] checks that.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<String>,
     /// Append `--message-format=json-diagnostic-rendered-ansi` handling so
     /// failures come back as structured file:line diagnostics instead of a log
@@ -248,7 +253,14 @@ impl Config {
             .recipes
             .get(name)
             .with_context(|| format!("no recipe `{name}` in {CONFIG_FILE}"))?;
-        Ok(r.resolve(name, platform))
+        let resolved = r.resolve(name, platform);
+        if resolved.steps.is_empty() {
+            anyhow::bail!(
+                "recipe `{name}` has no steps for {platform} — add them to \
+                 [recipes.{name}] or [recipes.{name}.{platform}]"
+            );
+        }
+        Ok(resolved)
     }
 
     pub fn template(project: &str, remote: Option<&str>, kind: Template) -> Self {
@@ -306,6 +318,95 @@ impl Config {
             context: ContextConfig::default(),
         }
     }
+}
+
+/// Point out keys the parser would silently ignore.
+///
+/// Serde tolerates unknown fields on purpose — two machines can run different
+/// versions of `sw` against the same committed file, and a newer field must not
+/// break the older binary. The cost of that tolerance is the silent typo:
+/// `[recipes.build.mac]` parses fine and does nothing, because the platform key
+/// is `macos`. Nothing would ever say so. This walks the raw document and names
+/// every key the typed config has no home for, so `sw doctor` can.
+pub fn lint(repo_root: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(repo_root.join(CONFIG_FILE)) else {
+        return Vec::new();
+    };
+    // `toml::Table`, not `toml::Value`: in toml 0.9 a whole document only
+    // parses as the former — `Value::from_str` wants a single value and fails.
+    let Ok(doc) = raw.parse::<toml::Table>() else {
+        return Vec::new(); // a parse failure is loud on its own
+    };
+    let mut warnings = Vec::new();
+    // A plain function, not a closure: the closure would hold `warnings`
+    // mutably for the whole body and block every direct push below.
+    fn check(
+        warnings: &mut Vec<String>,
+        table: &toml::Value,
+        at: &str,
+        known: &[&str],
+        hint: &str,
+    ) {
+        if let Some(t) = table.as_table() {
+            for key in t.keys() {
+                if !known.contains(&key.as_str()) {
+                    warnings.push(format!("`{at}` has an unknown key `{key}`{hint}"));
+                }
+            }
+        }
+    }
+
+    for key in doc.keys() {
+        if !["project", "recipes", "context"].contains(&key.as_str()) {
+            warnings.push(format!("`syncwork.toml` has an unknown key `{key}`"));
+        }
+    }
+    if let Some(project) = doc.get("project") {
+        check(&mut warnings, project, "project", &["name", "remote"], "");
+    }
+    if let Some(recipes) = doc.get("recipes").and_then(|r| r.as_table()) {
+        for (name, recipe) in recipes {
+            check(
+                &mut warnings,
+                recipe,
+                &format!("recipes.{name}"),
+                &["steps", "cargo_json", "env", "windows", "macos", "linux"],
+                " — platform overrides are windows / macos / linux",
+            );
+            for platform in ["windows", "macos", "linux"] {
+                if let Some(ov) = recipe.get(platform) {
+                    check(
+                        &mut warnings,
+                        ov,
+                        &format!("recipes.{name}.{platform}"),
+                        &["steps", "cargo_json", "env"],
+                        "",
+                    );
+                }
+            }
+        }
+    }
+    if let Some(context) = doc.get("context") {
+        check(
+            &mut warnings,
+            context,
+            "context",
+            &["roots", "quiet_secs", "claude", "extra"],
+            "",
+        );
+        if let Some(roots) = context.get("roots").and_then(|r| r.as_table()) {
+            for (name, root) in roots {
+                check(
+                    &mut warnings,
+                    root,
+                    &format!("context.roots.{name}"),
+                    &["kind", "path", "env"],
+                    "",
+                );
+            }
+        }
+    }
+    warnings
 }
 
 #[cfg(test)]
@@ -393,6 +494,80 @@ mod tests {
         )
         .unwrap();
         assert!(!without.context.resolved_roots().contains_key(ROOT_CLAUDE));
+    }
+
+    /// The tolerance that keeps old binaries reading new configs is also what
+    /// swallows typos. A real user wrote `[recipes.build.mac]` — legal TOML,
+    /// silently ignored, the mac-specific command never ran. Lint names it.
+    #[test]
+    fn lint_names_the_keys_the_parser_would_silently_swallow() {
+        let dir = std::env::temp_dir().join(format!(
+            "sw-lint-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            "[project]\nname = \"demo\"\n\n[recipes.build]\nsteps = [\"sh build.sh\"]\n\n\
+             [recipes.build.mac]\nsteps = [\"x\"]\n\n[context.roots.notes]\nkind = \"repo\"\n\
+             path = \"d\"\nenvv = \"typo\"\n",
+        )
+        .unwrap();
+        let warnings = lint(&dir);
+        assert!(
+            warnings.iter().any(|w| w.contains("recipes.build")
+                && w.contains("`mac`")
+                && w.contains("windows / macos / linux")),
+            "mac typo not caught: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("`envv`")),
+            "root key typo not caught: {warnings:?}"
+        );
+
+        // A clean file stays quiet.
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            "[project]\nname = \"demo\"\n\n[recipes.verify]\nsteps = [\"cargo test\"]\n\n\
+             [recipes.verify.macos]\nsteps = [\"cargo test -j2\"]\n",
+        )
+        .unwrap();
+        assert!(lint(&dir).is_empty(), "false positives: {:?}", lint(&dir));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two platforms whose commands share nothing should not have to invent a
+    /// fake "base" for one to override — the explicit style is legal, and the
+    /// platform left without steps errors at run time, by name.
+    #[test]
+    fn a_recipe_may_be_declared_per_platform_with_no_base() {
+        let cfg: Config = toml::from_str(
+            "[project]\nname = \"demo\"\n\n[recipes.build.windows]\nsteps = [\"build.cmd\"]\n\n\
+             [recipes.build.macos]\nsteps = [\"sh build.sh mac\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.recipe("build", Platform::Windows).unwrap().steps,
+            ["build.cmd"]
+        );
+        assert_eq!(
+            cfg.recipe("build", Platform::Macos).unwrap().steps,
+            ["sh build.sh mac"]
+        );
+        let err = cfg
+            .recipe("build", Platform::Linux)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("no steps for linux") && err.contains("recipes.build.linux"),
+            "unhelpful error: {err}"
+        );
     }
 
     #[test]

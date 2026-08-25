@@ -113,6 +113,12 @@ pub async fn run(peer_filter: Option<&str>) -> Result<i32> {
                     .unwrap_or_else(|_| "detached".into());
                 let state = if dirty { ", dirty" } else { "" };
                 r.ok(name, format!("{} ({branch}{state})", entry.path));
+                // Typos the parser tolerates on purpose (old binaries must read
+                // new configs) — `[recipes.x.mac]` instead of `macos` — do
+                // nothing, silently. This is the one place that says so.
+                for warning in config::repo::lint(path) {
+                    r.warn("config", warning);
+                }
             }
         }
     }
