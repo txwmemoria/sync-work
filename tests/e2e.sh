@@ -260,6 +260,16 @@ a "A/widget" verify > "$LAB/v4.out" 2> "$LAB/v4.err"
 [ $? -eq 0 ] || { tail -20 "$LAB/v4.err"; fail "fixed verify failed"; }
 echo "PASS exit 0"
 
+step "a hand-deleted worktree directory heals itself on the next verify"
+# Real incident: .sw/ in the peer's checkout was deleted by hand, but git kept
+# the registration in .git/worktrees — and every verify after that failed with
+# "missing but already registered worktree" until someone ran prune manually.
+rm -rf "B/widget/.sw/wt/node-a"
+a "A/widget" verify > "$LAB/v5.out" 2> "$LAB/v5.err"
+[ $? -eq 0 ] || { tail -20 "$LAB/v5.err"; fail "verify did not recover from a stale worktree registration"; }
+[ -d "B/widget/.sw/wt/node-a" ] || fail "worktree was not recreated"
+echo "PASS pruned and recreated"
+
 step "an unlinked project on the peer gives an actionable error"
 b "$LAB" unlink gadget > /dev/null || fail "unlink"
 a "A/gadget" verify > "$LAB/v5.out" 2> "$LAB/v5.err"

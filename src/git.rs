@@ -361,6 +361,12 @@ where
         if wt.exists() {
             let _ = tokio::fs::remove_dir_all(&wt).await;
         }
+        // The directory can also be gone while git still has it registered —
+        // a real incident: someone deleted .sw/ in this checkout by hand, and
+        // every verify after that failed with "missing but already registered
+        // worktree". Prune drops exactly those stale registrations and touches
+        // nothing that still exists.
+        let _ = run(repo, &["worktree", "prune"]).await;
         let out = run(
             repo,
             &[

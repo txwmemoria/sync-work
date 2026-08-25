@@ -425,7 +425,7 @@ New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$e
 
 ```bash
 cargo test          # 68 个单元测试
-bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，30 项检查
+bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，31 项检查
 ```
 
 端到端覆盖单元测试到不了的部分（配对、传输、worktree 隔离、上下文同步、watch、节点锁），其中多项是真实事故的回放。
