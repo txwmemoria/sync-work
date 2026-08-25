@@ -23,10 +23,20 @@ use std::time::Duration;
 #[derive(Default, Clone)]
 struct Snapshot {
     machine_lines: Vec<(String, String)>,
-    peer_lines: Vec<(bool, String)>,
+    peer_lines: Vec<(String, PeerHealth, String)>,
     project_lines: Vec<String>,
     history: Vec<history::Entry>,
     refreshed_at: String,
+}
+
+/// A peer line's state. `Checking` exists so the first frame can appear
+/// immediately — pinging takes a second or more, and blocking the whole screen
+/// on it made the dashboard open blank.
+#[derive(Clone, PartialEq)]
+enum PeerHealth {
+    Checking,
+    Up,
+    Down,
 }
 
 pub async fn run() -> Result<i32> {
@@ -44,10 +54,7 @@ pub async fn run() -> Result<i32> {
         let state = state.clone();
         tokio::spawn(async move {
             loop {
-                let snap = gather().await;
-                if let Ok(mut s) = state.lock() {
-                    *s = snap;
-                }
+                refresh(&state).await;
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         })
@@ -100,11 +107,63 @@ async fn ui_loop(
     }
 }
 
-/// Collect one snapshot's worth of facts. Failures degrade to placeholders —
-/// a dashboard that dies because one probe failed would be useless exactly
-/// when it is needed.
-async fn gather() -> Snapshot {
+/// One refresh round, in two stages: local facts are published the moment they
+/// are ready, then each peer's ping lands in the shared snapshot as it
+/// resolves. Failures degrade to placeholders — a dashboard that dies because
+/// one probe failed would be useless exactly when it is needed.
+async fn refresh(state: &Arc<Mutex<Snapshot>>) {
     let machine = Machine::load().unwrap_or_default();
+    let mut snap = local_facts(&machine).await;
+
+    // Carry each peer's previous verdict into the new round: flashing back to
+    // "checking…" every 5 seconds would turn the refresh into flicker. Only a
+    // peer never probed before shows the placeholder.
+    if let Ok(prev) = state.lock() {
+        for line in &mut snap.peer_lines {
+            if let Some(old) = prev
+                .peer_lines
+                .iter()
+                .find(|(name, health, _)| *name == line.0 && *health != PeerHealth::Checking)
+            {
+                *line = old.clone();
+            }
+        }
+    }
+    if let Ok(mut s) = state.lock() {
+        *s = snap;
+    }
+
+    let Ok(identity) = Identity::load_or_create().map(Arc::new) else {
+        return;
+    };
+    let mut probes = tokio::task::JoinSet::new();
+    for (i, (name, peer)) in machine.peers.iter().enumerate() {
+        let identity = identity.clone();
+        let (name, peer) = (name.clone(), peer.clone());
+        probes.spawn(async move {
+            let verdict = match ping(&identity, &peer).await {
+                Ok((build, paths)) => (
+                    PeerHealth::Up,
+                    format!("{name}  reachable [{build}]  {paths}"),
+                ),
+                Err(e) => (PeerHealth::Down, format!("{name}  unreachable — {e:#}")),
+            };
+            (i, verdict)
+        });
+    }
+    while let Some(Ok((i, (health, text)))) = probes.join_next().await {
+        if let Ok(mut s) = state.lock()
+            && let Some(line) = s.peer_lines.get_mut(i)
+        {
+            line.1 = health;
+            line.2 = text;
+        }
+    }
+}
+
+/// Everything that needs no network: this machine, its projects, the history
+/// file. Fast enough that the first frame carries it.
+async fn local_facts(machine: &Machine) -> Snapshot {
     let mut snap = Snapshot {
         refreshed_at: style::stamp_now_short(),
         ..Default::default()
@@ -152,16 +211,12 @@ async fn gather() -> Snapshot {
         snap.project_lines.push(format!("{name:<14} {detail}"));
     }
 
-    let identity = Identity::load_or_create().ok();
-    for (name, peer) in &machine.peers {
-        let line = match &identity {
-            Some(identity) => match ping(identity, peer).await {
-                Ok((build, paths)) => (true, format!("{name}  reachable [{build}]  {paths}")),
-                Err(e) => (false, format!("{name}  unreachable — {e:#}")),
-            },
-            None => (false, format!("{name}  (no local identity)")),
-        };
-        snap.peer_lines.push(line);
+    for name in machine.peers.keys() {
+        snap.peer_lines.push((
+            name.clone(),
+            PeerHealth::Checking,
+            format!("{name}  checking…"),
+        ));
     }
 
     snap.history = history::recent(50);
@@ -224,13 +279,16 @@ fn draw(frame: &mut ratatui::Frame, snap: &Snapshot) {
     } else {
         snap.peer_lines
             .iter()
-            .map(|(up, text)| {
-                let dot = if *up {
-                    Span::styled("● ", Style::default().fg(Color::Green))
-                } else {
-                    Span::styled("● ", Style::default().fg(Color::Red))
+            .map(|(_, health, text)| {
+                let colour = match health {
+                    PeerHealth::Checking => Color::DarkGray,
+                    PeerHealth::Up => Color::Green,
+                    PeerHealth::Down => Color::Red,
                 };
-                Line::from(vec![dot, Span::raw(text.clone())])
+                Line::from(vec![
+                    Span::styled("● ", Style::default().fg(colour)),
+                    Span::raw(text.clone()),
+                ])
             })
             .collect()
     };
