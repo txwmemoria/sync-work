@@ -128,13 +128,7 @@ pub async fn init(
 
 fn load_doc(repo: &Path) -> Result<DocumentMut> {
     let path = repo.join(config::CONFIG_FILE);
-    let raw = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "no {} at {}; run `sw init`",
-            config::CONFIG_FILE,
-            repo.display()
-        )
-    })?;
+    let raw = config::repo::read_config_file(repo)?;
     raw.parse::<DocumentMut>()
         .with_context(|| format!("failed to parse {}", path.display()))
 }

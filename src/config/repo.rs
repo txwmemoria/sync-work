@@ -10,7 +10,7 @@
 //! [`super::machine`].
 
 use super::Platform;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -243,12 +243,28 @@ pub fn missing_config_message(host: &str, project: &str, path: &Path) -> String 
     )
 }
 
+/// Read the raw config file, turning "not found" into the whole message. A
+/// missing file needs no io-error chain — "(os error 2)" tells the reader
+/// nothing the sentence before it did not — and has two ordinary causes worth
+/// naming: the project was never set up here, or it was set up on another
+/// machine and the commit has not been pulled.
+pub fn read_config_file(repo_root: &Path) -> Result<String> {
+    let path = repo_root.join(CONFIG_FILE);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => Ok(raw),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => bail!(
+            "no {CONFIG_FILE} in {}; run `sw init` to set the project up here, \
+             or `git pull` if another machine already committed one",
+            repo_root.display()
+        ),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
 impl Config {
     pub fn load(repo_root: &Path) -> Result<Self> {
         let path = repo_root.join(CONFIG_FILE);
-        let raw = std::fs::read_to_string(&path).with_context(|| {
-            format!("no {CONFIG_FILE} at {}; run `sw init`", repo_root.display())
-        })?;
+        let raw = read_config_file(repo_root)?;
         let cfg: Config =
             toml::from_str(&raw).with_context(|| format!("failed to parse {}", path.display()))?;
         Ok(cfg)
@@ -425,6 +441,21 @@ pub fn lint(repo_root: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A missing config has exactly two ordinary causes — never ran `sw init`
+    /// here, or it lives in a commit not yet pulled — and the error must name
+    /// both fixes without an io-error chain drowning them ("os error 2" tells
+    /// the reader nothing).
+    #[test]
+    fn a_missing_config_names_both_fixes_without_io_noise() {
+        let dir = std::env::temp_dir().join(format!("sw-noconf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let msg = format!("{:#}", read_config_file(&dir).unwrap_err());
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(msg.contains("sw init"), "no local fix in: {msg}");
+        assert!(msg.contains("git pull"), "no cross-machine fix in: {msg}");
+        assert!(!msg.contains("os error"), "io noise leaked into: {msg}");
+    }
 
     /// `syncwork.toml` is committed, so both machines read the identical file and
     /// one written before `roots` existed has to keep working. The failure mode of
