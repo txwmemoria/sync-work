@@ -344,11 +344,14 @@ fn history_line(e: &history::Entry) -> Line<'static> {
         None => ("failed".to_string(), Color::Red),
     };
     let secs = e.ms as f64 / 1000.0;
+    // Columns are padded for alignment, but the two-space gap is unconditional:
+    // `{:<22}` alone adds nothing once the content is wider than the column —
+    // a long machine name ran straight into the verdict.
     Line::from(vec![
         Span::styled(format!("{when}  "), Style::default().fg(Color::DarkGray)),
-        Span::raw(format!("{:<24}", format!("{}/{}", e.project, e.recipe))),
-        Span::raw(format!("{arrow:<22}")),
-        Span::styled(format!("{verdict:<10}",), Style::default().fg(colour)),
+        Span::raw(format!("{:<24}  ", format!("{}/{}", e.project, e.recipe))),
+        Span::raw(format!("{arrow:<26}  ")),
+        Span::styled(format!("{verdict:<8}  "), Style::default().fg(colour)),
         Span::styled(format!("{secs:.1}s"), Style::default().fg(Color::DarkGray)),
     ])
 }
