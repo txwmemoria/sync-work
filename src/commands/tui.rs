@@ -45,49 +45,62 @@ pub async fn run() -> Result<i32> {
         anyhow::bail!("sw tui needs a terminal");
     }
 
-    let state = Arc::new(Mutex::new(Snapshot::default()));
+    let identity = Identity::load_or_create()?;
 
-    // The refresher owns every slow operation — pinging the peer binds an
-    // endpoint and takes a second or more — so the draw loop never blocks and
-    // the screen stays responsive while the network does its thing.
-    let refresher = {
-        let state = state.clone();
-        tokio::spawn(async move {
-            // A fixed metronome, not sleep-after-work: refresh() itself takes
-            // a second or more waiting on peer pings, and adding that on top
-            // of the sleep stretched the advertised 5 seconds to 6–8.
-            let mut every = tokio::time::interval(Duration::from_secs(5));
-            every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // ONE endpoint for the whole session. Binding a fresh one per probe every
+    // five seconds — sockets, relay bootstrap, an mDNS discovery actor each
+    // time — piled up machinery faster than the async wind-down reclaimed it,
+    // and CPU climbed the longer the dashboard ran. The node never had this
+    // problem because it binds once; this was the first long-lived repeat
+    // binder. Reuse also drops the relay bootstrap from every probe.
+    transport::with_endpoint(&identity, |ep| async move {
+        let state = Arc::new(Mutex::new(Snapshot::default()));
+
+        // The refresher owns every slow operation — pinging the peer takes a
+        // second or more — so the draw loop never blocks and the screen stays
+        // responsive while the network does its thing.
+        let refresher = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                // A fixed metronome, not sleep-after-work: refresh() itself
+                // takes a second or more waiting on peer pings, and adding
+                // that on top of the sleep stretched the advertised 5 seconds
+                // to 6–8.
+                let mut every = tokio::time::interval(Duration::from_secs(5));
+                every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    every.tick().await;
+                    refresh(&state, &ep).await;
+                }
+            })
+        };
+
+        // Key events come from a blocking reader thread: crossterm's poll/read
+        // are synchronous, and parking a runtime worker on them would be wrong.
+        let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || {
             loop {
-                every.tick().await;
-                refresh(&state).await;
+                if ratatui::crossterm::event::poll(Duration::from_millis(200)).unwrap_or(false)
+                    && let Ok(TermEvent::Key(k)) = ratatui::crossterm::event::read()
+                    && k.kind == KeyEventKind::Press
+                    && key_tx.send(k.code).is_err()
+                {
+                    return;
+                }
             }
-        })
-    };
+        });
 
-    // Key events come from a blocking reader thread: crossterm's poll/read are
-    // synchronous, and parking a runtime worker on them would be wrong.
-    let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
-    std::thread::spawn(move || {
-        loop {
-            if ratatui::crossterm::event::poll(Duration::from_millis(200)).unwrap_or(false)
-                && let Ok(TermEvent::Key(k)) = ratatui::crossterm::event::read()
-                && k.kind == KeyEventKind::Press
-                && key_tx.send(k.code).is_err()
-            {
-                return;
-            }
-        }
-    });
-
-    // Colour styling belongs to the widgets now; our own Paint escapes would
-    // corrupt the buffer.
-    style::set_enabled(false);
-    let mut terminal = ratatui::init();
-    let outcome = ui_loop(&mut terminal, &state, &mut key_rx).await;
-    ratatui::restore();
-    refresher.abort();
-    outcome.map(|()| 0)
+        // Colour styling belongs to the widgets now; our own Paint escapes
+        // would corrupt the buffer.
+        style::set_enabled(false);
+        let mut terminal = ratatui::init();
+        let outcome = ui_loop(&mut terminal, &state, &mut key_rx).await;
+        ratatui::restore();
+        refresher.abort();
+        outcome
+    })
+    .await
+    .map(|()| 0)
 }
 
 async fn ui_loop(
@@ -116,7 +129,7 @@ async fn ui_loop(
 /// are ready, then each peer's ping lands in the shared snapshot as it
 /// resolves. Failures degrade to placeholders — a dashboard that dies because
 /// one probe failed would be useless exactly when it is needed.
-async fn refresh(state: &Arc<Mutex<Snapshot>>) {
+async fn refresh(state: &Arc<Mutex<Snapshot>>, ep: &iroh::Endpoint) {
     let machine = Machine::load().unwrap_or_default();
     let mut snap = local_facts(&machine).await;
 
@@ -138,15 +151,12 @@ async fn refresh(state: &Arc<Mutex<Snapshot>>) {
         *s = snap;
     }
 
-    let Ok(identity) = Identity::load_or_create().map(Arc::new) else {
-        return;
-    };
     let mut probes = tokio::task::JoinSet::new();
     for (i, (name, peer)) in machine.peers.iter().enumerate() {
-        let identity = identity.clone();
+        let ep = ep.clone();
         let (name, peer) = (name.clone(), peer.clone());
         probes.spawn(async move {
-            let verdict = match ping(&identity, &peer).await {
+            let verdict = match ping(&ep, &peer).await {
                 Ok((build, paths)) => (
                     PeerHealth::Up,
                     format!("{name}  reachable [{build}]  {paths}"),
@@ -228,30 +238,24 @@ async fn local_facts(machine: &Machine) -> Snapshot {
     snap
 }
 
-/// One ping, returning the peer's build stamp and the connection's paths.
-async fn ping(identity: &Identity, peer: &crate::config::Peer) -> Result<(String, String)> {
-    transport::with_endpoint(identity, |ep| {
-        let peer = peer.clone();
-        async move {
-            let conn = transport::connect(&ep, &peer).await?;
-            let (mut tx, mut rx) = transport::open_request(&conn).await?;
-            transport::write_request(
-                &mut tx,
-                Request::Ping {
-                    protocol: PROTOCOL_VERSION,
-                },
-            )
-            .await?;
-            tx.finish().ok();
-            match transport::read_event(&mut rx).await? {
-                Some(Event::Accepted { build, .. }) => {
-                    Ok((build, transport::describe_paths(&conn).await))
-                }
-                _ => anyhow::bail!("no reply"),
-            }
-        }
-    })
-    .await
+/// One ping over the session's shared endpoint, returning the peer's build
+/// stamp and the connection's paths. The connection is per-probe — dropping
+/// it closes it — but the endpoint underneath lives for the whole session.
+async fn ping(ep: &iroh::Endpoint, peer: &crate::config::Peer) -> Result<(String, String)> {
+    let conn = transport::connect(ep, peer).await?;
+    let (mut tx, mut rx) = transport::open_request(&conn).await?;
+    transport::write_request(
+        &mut tx,
+        Request::Ping {
+            protocol: PROTOCOL_VERSION,
+        },
+    )
+    .await?;
+    tx.finish().ok();
+    match transport::read_event(&mut rx).await? {
+        Some(Event::Accepted { build, .. }) => Ok((build, transport::describe_paths(&conn).await)),
+        _ => anyhow::bail!("no reply"),
+    }
 }
 
 fn draw(frame: &mut ratatui::Frame, snap: &Snapshot) {
