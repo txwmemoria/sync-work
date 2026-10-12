@@ -278,8 +278,15 @@ RC=$?
 grep -q "not linked on node-b" "$LAB/v5.err" \
   || { cat "$LAB/v5.err"; fail "error does not name the machine"; }
 grep -q "sw link" "$LAB/v5.err" || fail "error does not say how to fix it"
+# A refusal before any build is still a run both machines took part in. Only
+# the requester used to record it, so the two histories disagreed — and the
+# machine that had to fix the problem was the one that had forgotten it.
+grep -q '"direction":"sent".*"project":"gadget".*"code":null' "$LAB/hA/history.jsonl" \
+  || { cat "$LAB/hA/history.jsonl"; fail "requester did not record the refusal"; }
+grep -q '"direction":"served".*"project":"gadget".*"code":null' "$LAB/hB/history.jsonl" \
+  || { cat "$LAB/hB/history.jsonl"; fail "node did not record the refusal it sent"; }
 b "B/gadget" link > /dev/null || fail "re-link"
-echo "PASS actionable error, recovered by linking"
+echo "PASS actionable error recorded on both sides, recovered by linking"
 
 step "stderr carries no library noise"
 for f in "$LAB"/*.err; do

@@ -105,14 +105,6 @@ pub fn stamp_at_short(ts_ms: u64) -> String {
     .unwrap_or_else(|_| "?".into())
 }
 
-pub fn stamp_now_short() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    stamp_at_short(ms)
-}
-
 /// Styling helpers returning plain `String`s.
 ///
 /// Chaining works — `"ok".green().bold()` nests two sequences, which renders as

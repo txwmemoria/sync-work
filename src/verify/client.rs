@@ -145,7 +145,6 @@ async fn attempt(
         desc.dimmed()
     );
 
-    let (mut tx, mut rx) = transport::open_request(conn).await?;
     let req = Request::Verify(VerifyRequest {
         protocol: PROTOCOL_VERSION,
         project: cfg.project.name.clone(),
@@ -155,8 +154,42 @@ async fn attempt(
         from_host: Machine::load().map(|m| m.node_name()).unwrap_or_default(),
         color: crate::style::enabled(),
     });
+
+    // Recorded here, around the whole exchange, so that every way a run can
+    // end leaves a line — including the ones that arrive as no event at all:
+    // a peer that dies mid-build, a connection that drops. Those are the
+    // failures someone most needs to find afterwards.
+    let started = Instant::now();
+    let result = exchange(conn, req, &snap.patch, peer_name).await;
+    let (code, ms) = match &result {
+        // Not an ending: the caller retries against an older base.
+        Ok((Outcome::MissingBase(_), _)) => return result.map(|(o, _)| o),
+        Ok((Outcome::Done(code), Some(ms))) => (Some(*code), *ms),
+        _ => (None, started.elapsed().as_millis() as u64),
+    };
+    crate::history::record(&crate::history::Entry {
+        ts_ms: crate::ctx::now_ms(),
+        direction: crate::history::Direction::Sent,
+        peer: peer_name.to_string(),
+        project: cfg.project.name.clone(),
+        recipe: recipe.to_string(),
+        code,
+        ms,
+    });
+    result.map(|(o, _)| o)
+}
+
+/// Send the request and replay what comes back. Alongside the outcome, the
+/// build time the peer reported, when it reported one.
+async fn exchange(
+    conn: &iroh::endpoint::Connection,
+    req: Request,
+    patch: &[u8],
+    peer_name: &str,
+) -> Result<(Outcome, Option<u64>)> {
+    let (mut tx, mut rx) = transport::open_request(conn).await?;
     transport::write_request(&mut tx, req).await?;
-    transport::write_frame(&mut tx, &snap.patch).await?;
+    transport::write_frame(&mut tx, patch).await?;
     tx.finish().ok();
 
     let started = Instant::now();
@@ -207,29 +240,9 @@ async fn attempt(
                 }
                 print_diagnostic(&d);
             }
-            Event::MissingBase { base } => return Ok(Outcome::MissingBase(base)),
-            Event::Failed { message } => {
-                crate::history::record(&crate::history::Entry {
-                    ts_ms: crate::ctx::now_ms(),
-                    direction: crate::history::Direction::Sent,
-                    peer: peer_name.to_string(),
-                    project: cfg.project.name.clone(),
-                    recipe: recipe.to_string(),
-                    code: None,
-                    ms: started.elapsed().as_millis() as u64,
-                });
-                return Ok(Outcome::Failed(message));
-            }
+            Event::MissingBase { base } => return Ok((Outcome::MissingBase(base), None)),
+            Event::Failed { message } => return Ok((Outcome::Failed(message), None)),
             Event::Done { code, ms } => {
-                crate::history::record(&crate::history::Entry {
-                    ts_ms: crate::ctx::now_ms(),
-                    direction: crate::history::Direction::Sent,
-                    peer: peer_name.to_string(),
-                    project: cfg.project.name.clone(),
-                    recipe: recipe.to_string(),
-                    code: Some(code),
-                    ms,
-                });
                 let wall = started.elapsed().as_millis() as u64;
                 let summary = format!(
                     "{} error{}, {} warning{}",
@@ -253,13 +266,14 @@ async fn attempt(
                         format!("({summary})").dimmed()
                     );
                 }
-                return Ok(Outcome::Done(code));
+                return Ok((Outcome::Done(code), Some(ms)));
             }
         }
     }
     // The stream ended without a terminal event — the peer died mid-build.
-    Ok(Outcome::Failed(
-        "peer closed the connection without finishing".into(),
+    Ok((
+        Outcome::Failed("peer closed the connection without finishing".into()),
+        None,
     ))
 }
 

@@ -43,7 +43,19 @@ fn acquire_lock() -> Result<std::fs::File> {
     let path = dir.join(LOCK_FILE);
     let file = std::fs::File::create(&path)
         .with_context(|| format!("could not open {}", path.display()))?;
-    match file.try_lock() {
+    // A few tries, not one: `is_running` takes a momentary shared lock to ask
+    // the question, and a node starting in that instant must not conclude it
+    // is the second one. A real second node holds the lock for life, so the
+    // retries cannot mask it.
+    let mut attempt = file.try_lock();
+    for _ in 0..5 {
+        if !matches!(attempt, Err(std::fs::TryLockError::WouldBlock)) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        attempt = file.try_lock();
+    }
+    match attempt {
         Ok(()) => Ok(file),
         Err(std::fs::TryLockError::WouldBlock) => bail!(
             "another `sw node` is already running on this machine — it holds {}. \
@@ -60,6 +72,28 @@ fn acquire_lock() -> Result<std::fs::File> {
             );
             Ok(file)
         }
+    }
+}
+
+/// Whether this machine's node is running, by asking its lock rather than the
+/// process table. Exact for this state directory, and costs one file open —
+/// the process query (`service::running_nodes`) launches PowerShell on
+/// Windows, far too heavy for anything that asks every few seconds.
+///
+/// `None` when the lock cannot be consulted at all.
+pub fn is_running() -> Option<bool> {
+    let path = crate::config::machine::home().ok()?.join(LOCK_FILE);
+    let file = match std::fs::File::open(&path) {
+        Ok(f) => f,
+        // No lock file: no node has ever run with this state directory.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Some(false),
+        Err(_) => return None,
+    };
+    // Shared, so two observers never block each other; released on drop.
+    match file.try_lock_shared() {
+        Ok(()) => Some(false),
+        Err(std::fs::TryLockError::WouldBlock) => Some(true),
+        Err(std::fs::TryLockError::Error(_)) => None,
     }
 }
 
@@ -256,7 +290,15 @@ async fn route(
     // Requests are logged as they arrive. All the interesting output — stages,
     // build logs, diagnostics — is streamed to the *requester*, so without this
     // the node looks idle even while it is compiling.
-    tracing::info!("{peer_name}: {}", describe(&req));
+    //
+    // Pings are the exception: `sw tui` on the other machine sends one every
+    // few seconds, and at info level they buried the verify and ctx lines
+    // this log exists to show. `SW_LOG=debug` brings them back.
+    if matches!(req, Request::Ping { .. }) {
+        tracing::debug!("{peer_name}: {}", describe(&req));
+    } else {
+        tracing::info!("{peer_name}: {}", describe(&req));
+    }
     match req {
         Request::Ping { protocol } => {
             let machine = Machine::load()?;
@@ -470,5 +512,35 @@ async fn ping_exchange(conn: &iroh::endpoint::Connection) -> Result<()> {
             }
         }
         other => bail!("unexpected reply from peer: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The dashboard asks the lock, not the process table, so the lock's two
+    /// states must read back correctly — and asking must not take the lock
+    /// away from a node that starts a moment later.
+    #[test]
+    fn the_lock_answers_whether_a_node_is_running() {
+        let _guard = crate::ctx::base::TEST_HOME_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let home = std::env::temp_dir().join(format!("sw-nodelock-{}", crate::ctx::now_ms()));
+        // SAFETY: the lock above serialises every test that touches SW_HOME.
+        unsafe { std::env::set_var("SW_HOME", &home) };
+
+        assert_eq!(is_running(), Some(false), "never ran");
+        let held = acquire_lock().expect("first node takes the lock");
+        assert_eq!(is_running(), Some(true), "lock held");
+        drop(held);
+        assert_eq!(is_running(), Some(false), "released on exit");
+        // Asking leaves nothing held behind.
+        let again = acquire_lock().expect("a node can still start after being asked about");
+        drop(again);
+
+        unsafe { std::env::remove_var("SW_HOME") };
+        std::fs::remove_dir_all(&home).ok();
     }
 }

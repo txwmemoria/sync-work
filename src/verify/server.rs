@@ -62,121 +62,129 @@ pub async fn handle(
             }
         };
 
-        if v.protocol != PROTOCOL_VERSION {
-            send(Event::Failed {
-                message: version_mismatch(v.protocol),
+        // Every path below ends in exactly one terminal event, returned rather
+        // than sent, so that recording and logging happen in one place for all
+        // of them. The early refusals matter as much as the builds: a run that
+        // failed here before compiling anything is still a run this machine
+        // took part in, and leaving it out made the two machines' histories
+        // disagree about what happened.
+        let received = Instant::now();
+        let ev: Event = async {
+            if v.protocol != PROTOCOL_VERSION {
+                return Event::Failed {
+                    message: version_mismatch(v.protocol),
+                };
+            }
+
+            // Every message below crosses the wire and is read on the *other*
+            // machine, so each one names this host — "the file is missing" is
+            // useless to someone who cannot see this filesystem.
+            let host = Machine::load().map(|m| m.node_name()).unwrap_or_default();
+
+            let repo = match Machine::resolve_project(&v.project) {
+                Ok(r) => r,
+                Err(message) => return Event::Failed { message },
+            };
+
+            let cfg = match Config::load(&repo) {
+                Ok(c) => c,
+                Err(_) => {
+                    return Event::Failed {
+                        message: crate::config::repo::missing_config_message(
+                            &host, &v.project, &repo,
+                        ),
+                    };
+                }
+            };
+            // The registry could name a checkout of some other project entirely.
+            if cfg.project.name != v.project {
+                return Event::Failed {
+                    message: format!(
+                        "{} on {host} holds project `{}`, not `{}` — its registry entry \
+                         is stale; run `sw link` in the right clone on {host}",
+                        repo.display(),
+                        cfg.project.name,
+                        v.project
+                    ),
+                };
+            }
+
+            send(Event::Accepted {
+                host: host.clone(),
+                platform,
+                repo: repo.display().to_string(),
+                build: env!("SW_BUILD").to_string(),
             })
             .await;
-            return;
-        }
 
-        // Every message below crosses the wire and is read on the *other*
-        // machine, so each one names this host — "the file is missing" is
-        // useless to someone who cannot see this filesystem.
-        let host = Machine::load().map(|m| m.node_name()).unwrap_or_default();
+            let recipe = match cfg.recipe(&v.recipe, platform) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Event::Failed {
+                        message: recipe_failure(&cfg, &v.recipe, &host, &e),
+                    };
+                }
+            };
 
-        let repo = match Machine::resolve_project(&v.project) {
-            Ok(r) => r,
-            Err(message) => {
-                send(Event::Failed { message }).await;
-                return;
-            }
-        };
-
-        let cfg = match Config::load(&repo) {
-            Ok(c) => c,
-            Err(_) => {
-                send(Event::Failed {
-                    message: crate::config::repo::missing_config_message(&host, &v.project, &repo),
-                })
-                .await;
-                return;
-            }
-        };
-        // The registry could name a checkout of some other project entirely.
-        if cfg.project.name != v.project {
-            send(Event::Failed {
-                message: format!(
-                    "{} on {host} holds project `{}`, not `{}` — its registry entry \
-                     is stale; run `sw link` in the right clone on {host}",
-                    repo.display(),
-                    cfg.project.name,
-                    v.project
-                ),
-            })
-            .await;
-            return;
-        }
-
-        send(Event::Accepted {
-            host: host.clone(),
-            platform,
-            repo: repo.display().to_string(),
-            build: env!("SW_BUILD").to_string(),
-        })
-        .await;
-
-        let recipe = match cfg.recipe(&v.recipe, platform) {
-            Ok(r) => r,
-            Err(e) => {
-                send(Event::Failed {
-                    message: recipe_failure(&cfg, &v.recipe, &host, &e),
-                })
-                .await;
-                return;
-            }
-        };
-
-        let staged = etx.clone();
-        let wt =
-            match git::prepare_worktree(&repo, &v.base, &patch, &cfg.project.remote, &label, |s| {
-                // try_send: a dropped progress line is preferable to blocking the
-                // git plumbing, and the channel is sized well past the handful of
-                // stages a prepare emits.
-                let _ = staged.try_send(Event::Stage { name: s });
-            })
+            let staged = etx.clone();
+            let wt = match git::prepare_worktree(
+                &repo,
+                &v.base,
+                &patch,
+                &cfg.project.remote,
+                &label,
+                |s| {
+                    // try_send: a dropped progress line is preferable to blocking the
+                    // git plumbing, and the channel is sized well past the handful of
+                    // stages a prepare emits.
+                    let _ = staged.try_send(Event::Stage { name: s });
+                },
+            )
             .await
             {
                 Ok(w) => w,
                 Err(git::PrepareError::MissingBase(base)) => {
-                    send(Event::MissingBase { base }).await;
-                    return;
+                    return Event::MissingBase { base };
                 }
                 Err(git::PrepareError::Other(e)) => {
-                    send(Event::Failed {
+                    return Event::Failed {
                         message: format!("{e:#} (preparing the worktree on {host})"),
-                    })
-                    .await;
-                    return;
+                    };
                 }
             };
 
-        let started = Instant::now();
-        let ev = match exec::run_recipe(&wt, &recipe, platform, v.color, &etx).await {
-            Ok(code) => Event::Done {
-                code,
-                ms: started.elapsed().as_millis() as u64,
-            },
-            Err(e) => Event::Failed {
-                message: format!("{e:#} (running the recipe on {host})"),
-            },
-        };
-        // Recorded for `sw tui` and mirrored into the node's own log: the
-        // requester sees the full build output, but this machine should also
-        // remember that the run happened and how it ended.
+            let started = Instant::now();
+            match exec::run_recipe(&wt, &recipe, platform, v.color, &etx).await {
+                Ok(code) => Event::Done {
+                    code,
+                    ms: started.elapsed().as_millis() as u64,
+                },
+                Err(e) => Event::Failed {
+                    message: format!("{e:#} (running the recipe on {host})"),
+                },
+            }
+        }
+        .await;
+
         let (code, ms) = match &ev {
             Event::Done { code, ms } => (Some(*code), *ms),
-            _ => (None, started.elapsed().as_millis() as u64),
+            _ => (None, received.elapsed().as_millis() as u64),
         };
-        crate::history::record(&crate::history::Entry {
-            ts_ms: crate::ctx::now_ms(),
-            direction: crate::history::Direction::Served,
-            peer: label.clone(),
-            project: v.project.clone(),
-            recipe: v.recipe.clone(),
-            code,
-            ms,
-        });
+        // MissingBase is not an ending: the requester retries with a wider patch.
+        if !matches!(ev, Event::MissingBase { .. }) {
+            crate::history::record(&crate::history::Entry {
+                ts_ms: crate::ctx::now_ms(),
+                direction: crate::history::Direction::Served,
+                peer: label.clone(),
+                project: v.project.clone(),
+                recipe: v.recipe.clone(),
+                code,
+                ms,
+            });
+        }
+        // Mirrored into the node's own log: the requester sees the full build
+        // output, but whoever is watching this machine should still see that a
+        // request arrived and how it ended.
         match &ev {
             Event::Done { code, ms } => {
                 tracing::info!(

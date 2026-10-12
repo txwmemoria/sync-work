@@ -189,10 +189,12 @@ sw doctor           # 哪里不对一次查清（见「排查」）
 ### `sw tui` —— 实时面板
 
 ```bash
-sw tui              # 本机、对端、项目、verify 历史，一屏看完，每 5 秒自动刷新
+sw tui              # 本机、对端、项目、verify 历史，一屏看完，自动刷新
 ```
 
-只读面板，`q` 或 `Esc` 退出。历史区记录每次 verify 的两个方向：`→ 对端` 是这台机器发起的，`← 对端` 是这台机器替对方构建的，附退出码和耗时。数据落在 `~/.syncwork/history.jsonl`，面板只是读它。
+只读面板，`q` 或 `Esc` 退出。历史区记录每次 verify 的两个方向：`→ 对端` 是这台机器发起的，`← 对端` 是这台机器替对方构建的，附退出码和耗时；构建开始前就被拒的（项目没关联、配置缺失等）也算一次，两边都记。数据落在 `~/.syncwork/history.jsonl`，超过 512 KB 自动裁到最近 2000 条，面板只是读它。
+
+对端和历史每 5 秒刷新；项目每 15 秒一次 —— `git status` 要扫整个工作区，大仓库扛不住更频繁。对端 10 秒没应答就标红，不会拖住其他区块。
 
 ## 更新
 
@@ -424,7 +426,7 @@ New-NetFirewallRule -DisplayName "syncwork mDNS" -Direction Inbound -Program "$e
 ## 测试与源码
 
 ```bash
-cargo test          # 68 个单元测试
+cargo test          # 71 个单元测试
 bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，31 项检查
 ```
 
