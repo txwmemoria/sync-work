@@ -1,0 +1,28 @@
+name: 故障
+description: sw 的行为和文档不一致，或一台机器连不上、验证结果不对
+title: ""
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 期望是什么，实际是什么。不要贴私钥、配对 ticket、会话内容，也不要贴完整的 sw doctor 输出。
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: 两边的环境
+      description: 各写一行系统、sw 版本（sw --version）和这次走的是直连还是中转。
+      placeholder: |
+        macOS 15, sw 0.1.0 (abc1234), direct
+        Windows 11, sw 0.1.0 (abc1234), relay
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎么重现
+    validations:
+      required: false

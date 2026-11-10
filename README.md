@@ -1,5 +1,7 @@
 # sw
 
+[English](README.en.md) · [贡献](CONTRIBUTING.md) · [安全](SECURITY.md) · [变更](CHANGELOG.md) · [MIT](LICENSE)
+
 在两台机器（Windows / macOS）上开发同一个项目时，把中间那些来回的手工操作去掉。
 
 ## 它解决什么
