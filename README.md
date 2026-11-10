@@ -432,6 +432,8 @@ cargo test          # 71 个单元测试
 bash tests/e2e.sh   # 端到端：两台机器、两个项目、一个节点，31 项检查
 ```
 
+GitHub Actions 在 Linux x86_64、Windows x86_64 和 macOS arm64 上跑 `cargo test --locked`，通过后再做 `cargo build --release --locked`，把 `sw`（Windows 是 `sw.exe`）和 `LICENSE` 打成 zip，留在当次运行的 artifact 里 14 天。推送 `v*` 标签时，同一套三端包会挂到 [Release](https://github.com/txwmemoria/sync-work/releases)。端到端脚本要连 iroh 的发现服务，不放进 CI。
+
 端到端覆盖单元测试到不了的部分（配对、传输、worktree 隔离、上下文同步、watch、节点锁），其中多项是真实事故的回放。
 
 ```

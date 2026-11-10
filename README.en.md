@@ -146,4 +146,6 @@ cargo test
 cargo build && bash tests/e2e.sh
 ```
 
+GitHub Actions runs `cargo test --locked` and then `cargo build --release --locked` on Linux x86_64, Windows x86_64, and macOS arm64. Each run keeps a zip of `sw` (or `sw.exe`) plus `LICENSE` for 14 days. A `v*` tag publishes those three archives on the Release. `tests/e2e.sh` stays local because it needs iroh discovery.
+
 See [CONTRIBUTING.md](CONTRIBUTING.md).

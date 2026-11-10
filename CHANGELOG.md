@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+- GitHub Actions 在 Linux x86_64、Windows x86_64、macOS arm64 上测试并打包；`v*` 标签发布这三个 zip
+
 ## [0.1.0] - 2026-11-10
 
 第一次公开。

@@ -6,9 +6,49 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
       - name: cargo test
-        run: cargo test
+        run: cargo test --locked
+
+  package:
+    name: package (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.91
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release
+        run: cargo build --release --locked
+      - name: zip the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          triple="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin=sw.exe
+          else
+            bin=sw
+          fi
+          mkdir -p "dist/$triple"
+          cp "target/release/$bin" LICENSE "dist/$triple/"
+          tar -a -cf "sw-$triple.zip" -C "dist/$triple" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sw-${{ matrix.os }}
+          path: sw-*.zip
+          if-no-files-found: error
+          retention-days: 14
